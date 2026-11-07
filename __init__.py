@@ -1,9 +1,9 @@
 bl_info = {
     "name": "Auxlink",
     "author": "Auxerov",
-    "version": (1, 2, 5),
+    "version": (1, 2, 6),
     "blender": (5, 0, 0),
-    "location": "3D Viewport > Right-Click > Auxlink  (also: Object menu / F3 search / N-Panel)",
+    "location": "3D Viewport > Right-Click > Auxlink  (also: Shift+A > Auxlink / Object menu / F3 / N-Panel)",
     "description": "Save and edit modifier stacks as presets, YAML import/export, and Autolattice deformation",
     "category": "Object",
 }
@@ -1263,12 +1263,11 @@ def _find_lattice_pair(context):
 
 def _calc_subselection_bounds(obj):
     """
-    Check if a subset of vertices is selected (in either Edit or Object mode).
-    If so, calculate and return (sel_min, sel_max) in object local space,
-    taking Skin modifier vertex radii into account if present.
-    Returns (None, None) if all or no vertices are selected.
+    Check if a subset of vertices is selected ONLY when in Edit mode.
+    Returns (None, None) if in Object mode, or if all/no vertices are selected.
+    Takes Skin modifier vertex radii into account if present.
     """
-    if not obj or obj.type != 'MESH':
+    if not obj or obj.type != 'MESH' or obj.mode != 'EDIT':
         return None, None
 
     sel_indices = []
@@ -1276,47 +1275,25 @@ def _calc_subselection_bounds(obj):
     radii = {}
     has_skin = any(m.type == 'SKIN' for m in obj.modifiers)
 
-    if obj.mode == 'EDIT':
-        try:
-            import bmesh
-            bm = bmesh.from_edit_mesh(obj.data)
-            total = len(bm.verts)
-            skin_layer = bm.verts.layers.skin.active if (has_skin and hasattr(bm.verts.layers, 'skin') and bm.verts.layers.skin) else None
-            for v in bm.verts:
-                if v.select:
-                    sel_indices.append(v.index)
-                    sel_coords.append(Vector(v.co))
-                    rx, ry = (0.0, 0.0)
-                    if skin_layer is not None:
-                        try:
-                            r_val = v[skin_layer].radius
-                            rx, ry = float(r_val[0]), float(r_val[1])
-                        except Exception:
-                            rx, ry = (0.0, 0.0)
-                    radii[v.index] = (rx, ry)
-        except Exception:
-            return None, None
-    else:
-        try:
-            total = len(obj.data.vertices)
-            skin_data = None
-            if has_skin and hasattr(obj.data, 'skin_vertices') and len(obj.data.skin_vertices) > 0:
-                skin_data = obj.data.skin_vertices[0].data
-
-            for v in obj.data.vertices:
-                if v.select:
-                    sel_indices.append(v.index)
-                    sel_coords.append(Vector(v.co))
-                    rx, ry = (0.0, 0.0)
-                    if skin_data and v.index < len(skin_data):
-                        try:
-                            r = skin_data[v.index].radius
-                            rx, ry = float(r[0]), float(r[1])
-                        except Exception:
-                            rx, ry = (0.0, 0.0)
-                    radii[v.index] = (rx, ry)
-        except Exception:
-            return None, None
+    try:
+        import bmesh
+        bm = bmesh.from_edit_mesh(obj.data)
+        total = len(bm.verts)
+        skin_layer = bm.verts.layers.skin.active if (has_skin and hasattr(bm.verts.layers, 'skin') and bm.verts.layers.skin) else None
+        for v in bm.verts:
+            if v.select:
+                sel_indices.append(v.index)
+                sel_coords.append(Vector(v.co))
+                rx, ry = (0.0, 0.0)
+                if skin_layer is not None:
+                    try:
+                        r_val = v[skin_layer].radius
+                        rx, ry = float(r_val[0]), float(r_val[1])
+                    except Exception:
+                        rx, ry = (0.0, 0.0)
+                radii[v.index] = (rx, ry)
+    except Exception:
+        return None, None
 
     if not sel_indices or len(sel_indices) >= total:
         return None, None
@@ -1353,27 +1330,13 @@ def _calc_mesh_bounds_tight(obj, context):
         depsgraph = context.evaluated_depsgraph_get()
         eval_obj = obj.evaluated_get(depsgraph)
 
-        min_local = None
-        max_local = None
-
-        try:
-            eval_mesh = eval_obj.to_mesh()
-            if eval_mesh and len(eval_mesh.vertices) > 0:
-                import numpy as np
-                coords = np.empty(len(eval_mesh.vertices) * 3, dtype=np.float32)
-                eval_mesh.vertices.foreach_get("co", coords)
-                coords = coords.reshape((-1, 3))
-                min_local = Vector(coords.min(axis=0))
-                max_local = Vector(coords.max(axis=0))
-        except Exception:
-            pass
-        finally:
-            eval_obj.to_mesh_clear()
-
-        if min_local is None or max_local is None:
-            bbox_corners = [Vector(c) for c in eval_obj.bound_box]
+        bbox_corners = [Vector(c) for c in eval_obj.bound_box] if eval_obj.bound_box else []
+        if bbox_corners:
             min_local = Vector((min(c[i] for c in bbox_corners) for i in range(3)))
             max_local = Vector((max(c[i] for c in bbox_corners) for i in range(3)))
+        else:
+            min_local = Vector((-1.0, -1.0, -1.0))
+            max_local = Vector((1.0, 1.0, 1.0))
 
         center_local = (min_local + max_local) / 2.0
         size_local = max_local - min_local
@@ -1388,21 +1351,21 @@ class _AutolatticeCore:
 
     points_u: IntProperty(
         name="Columns (U / X)",
-        description="Number of lattice control points along X (subdivides internally within cage)",
+        description="Number of lattice control points along X",
         default=2,
         min=1,
         max=64,
     )
     points_v: IntProperty(
         name="Rows (V / Y)",
-        description="Number of lattice control points along Y (subdivides internally within cage)",
+        description="Number of lattice control points along Y",
         default=2,
         min=1,
         max=64,
     )
     points_w: IntProperty(
         name="Height (W / Z)",
-        description="Number of lattice control points along Z (subdivides internally within cage; set to 1 for flat single-layer cage)",
+        description="Number of lattice control points along Z",
         default=2,
         min=1,
         max=64,
@@ -1452,8 +1415,8 @@ class _AutolatticeCore:
     )
     enter_edit_mode: BoolProperty(
         name="Enter Edit Mode",
-        description="Immediately enter Edit Mode to move lattice points (leave disabled for real-time live grid tweaking)",
-        default=False,
+        description="Immediately enter Edit Mode to move lattice points",
+        default=True,
     )
 
     @classmethod
@@ -1498,29 +1461,15 @@ class _AutolatticeCore:
         col_opt.prop(self, "use_parent", text="Parent to Mesh")
         col_opt.prop(self, "enter_edit_mode", text="Enter Edit Mode")
 
-    def invoke(self, context, event):
-        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
-        if lat_obj and lat_obj.data:
-            self.points_u = lat_obj.data.points_u
-            self.points_v = lat_obj.data.points_v
-            self.points_w = lat_obj.data.points_w
-        return self.execute(context)
-
     def execute(self, context):
         act = context.active_object
         if act is None:
             self.report({'ERROR'}, "No active object")
             return {'CANCELLED'}
 
-        existing_lat = None
         if act.type == 'MESH':
             obj = act
-            for m in obj.modifiers:
-                if m.type == 'LATTICE' and m.name.startswith("AutoLattice") and m.object:
-                    existing_lat = m.object
-                    break
         elif act.type == 'LATTICE':
-            existing_lat = act
             if act.parent and act.parent.type == 'MESH':
                 obj = act.parent
             else:
@@ -1537,39 +1486,27 @@ class _AutolatticeCore:
             self.report({'ERROR'}, "Active object must be a Mesh or Autolattice")
             return {'CANCELLED'}
 
-        # If an Autolattice already exists, pure internal subdivision:
-        # Update point counts cleanly without modifying cage dimensions or multiplying scale!
-        if existing_lat and existing_lat.data:
-            lat_data = existing_lat.data
-            lat_data.points_u = self.points_u
-            lat_data.points_v = self.points_v
-            lat_data.points_w = self.points_w
-            lat_data.interpolation_type_u = self.interpolation
-            lat_data.interpolation_type_v = self.interpolation
-            lat_data.interpolation_type_w = self.interpolation
-
-            context.view_layer.update()
-            for o in context.selected_objects:
-                o.select_set(False)
-            context.view_layer.objects.active = existing_lat
-            existing_lat.select_set(True)
-
-            if self.enter_edit_mode:
-                try:
-                    bpy.ops.object.mode_set(mode='EDIT')
-                except Exception:
-                    pass
-
-            self.report({'INFO'}, f"Autolattice subdivided: {self.points_u} cols x {self.points_v} rows x {self.points_w} height")
-            return {'FINISHED'}
-
         was_in_edit = (obj.mode == 'EDIT')
 
-        # 1. Check for vertex sub-selection (works in both Edit and Object modes)
-        min_local, max_local = _calc_subselection_bounds(obj)
-
+        # 1. Check for vertex sub-selection ONLY if called from Edit mode
+        min_local, max_local = (None, None)
         if was_in_edit:
+            min_local, max_local = _calc_subselection_bounds(obj)
             bpy.ops.object.mode_set(mode='OBJECT')
+
+        # Clean up existing Autolattice modifier & lattice object on this object if already present
+        for m in list(obj.modifiers):
+            if m.type == 'LATTICE' and m.name.startswith("AutoLattice"):
+                old_lat = m.object
+                obj.modifiers.remove(m)
+                if old_lat:
+                    old_data = old_lat.data
+                    try:
+                        bpy.data.objects.remove(old_lat, do_unlink=True)
+                        if old_data and old_data.users == 0:
+                            bpy.data.lattices.remove(old_data, do_unlink=True)
+                    except Exception:
+                        pass
 
         # 2. If no sub-selection, calculate tight bounds from evaluated mesh
         if min_local is None or max_local is None:
@@ -1578,10 +1515,12 @@ class _AutolatticeCore:
             center_local = (min_local + max_local) / 2.0
             size_local = max_local - min_local
 
-        # 1.3x size (modelin çevresinin 1.3 katı)
+        # 1.3x size (modelin çevresinin 1.3 katı), with minimum thickness guard for 2D/flat models
         factor = self.scale_factor if hasattr(self, "scale_factor") else (1.0 + getattr(self, "margin", 0.3))
+        max_dim = max(size_local) if any(s > 0 for s in size_local) else 1.0
+        min_thick = max(max_dim * 0.1, 0.05)
         padded_size = Vector((
-            max(max(size_local[i], 1e-4) * factor, 1e-4)
+            max(size_local[i] * factor, min_thick)
             for i in range(3)
         ))
 
@@ -1753,8 +1692,10 @@ class AUXLINK_OT_refit_lattice(bpy.types.Operator):
             size_local = max_local - min_local
 
         factor = self.scale_factor if hasattr(self, "scale_factor") else (1.0 + getattr(self, "margin", 0.3))
+        max_dim = max(size_local) if any(s > 0 for s in size_local) else 1.0
+        min_thick = max(max_dim * 0.1, 0.05)
         padded_size = Vector((
-            max(max(size_local[i], 1e-4) * factor, 1e-4)
+            max(size_local[i] * factor, min_thick)
             for i in range(3)
         ))
 
@@ -1916,7 +1857,12 @@ def _draw_auxlink_entry(self, context):
     layout.menu(AUXLINK_MT_main.bl_idname, icon='MODIFIER')
 
 
-_APPEND_TO = ("VIEW3D_MT_object_context_menu", "VIEW3D_MT_object")
+_APPEND_TO = (
+    "VIEW3D_MT_object_context_menu",
+    "VIEW3D_MT_object",
+    "VIEW3D_MT_edit_mesh_context_menu",
+    "VIEW3D_MT_add",
+)
 
 
 class AUXLINK_PT_lattice_panel(bpy.types.Panel):
@@ -1951,7 +1897,8 @@ class AUXLINK_PT_lattice_panel(bpy.types.Panel):
 
             row_tools = box.row(align=True)
             row_tools.operator(AUXLINK_OT_refit_lattice.bl_idname, text="Refit (1.3x)", icon='FULLSCREEN_ENTER')
-            row_tools.operator(AUXLINK_OT_adjust_lattice.bl_idname, text="Subdivide Grid", icon='GRID')
+            row_tools.operator(AUXLINK_OT_autolattice.bl_idname, text="Recreate", icon='FILE_REFRESH')
+            row_tools.operator(AUXLINK_OT_adjust_lattice.bl_idname, text="Dialog...", icon='GRID')
 
             box.separator()
             row_mode = box.row(align=True)

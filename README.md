@@ -6,6 +6,17 @@ Auxlink also includes **Autolattice**, tuned specifically for fast, tight-fittin
 
 ---
 
+## What's New in v1.2.6
+
+- 🚀 **Instant Lattice Visibility & Auto Edit Mode**:
+  - Autolattice now automatically enters Lattice Edit Mode upon creation with points highlighted, immediately visible, and ready to deform.
+  - Automatically cleans up any stale or broken lattices on the mesh before creating a pristine new one.
+  - Added minimum thickness guard (`min_thick`) preventing 2D/flat models from collapsing to invisible sheets.
+  - Fixed subselection bug where residual Object Mode vertex selections could collapse lattice bounds.
+  - Available everywhere: Right-Click (Object & Edit Mode), Shift+A Add Menu, Top Object Menu, and N-Panel.
+
+---
+
 ## What's New in v1.2.5
 
 - 🧊 **Standard Normal Lattice Default (2x2x2)**:
