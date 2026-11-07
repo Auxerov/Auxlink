@@ -1,0 +1,33 @@
+schema_version = "1.0.0"
+
+id = "auxlink"
+version = "1.0.0"
+name = "Auxlink"
+tagline = "Save, restore and share modifier stack presets"
+maintainer = "Auxerov"
+type = "add-on"
+
+website = "https://github.com/Auxerov/Auxlink"
+tags = ["Object"]
+
+blender_version_min = "5.0.0"
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+copyright = [
+  "2026 Auxerov",
+]
+
+[permissions]
+files = "Read and write modifier presets YAML file"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  "/.git/",
+  "*.pyc",
+  "*.zip",
+  ".gitignore",
+  "README.md",
+]
