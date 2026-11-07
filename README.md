@@ -6,6 +6,18 @@ Auxlink also includes **Autolattice**, tuned specifically for fast, tight-fittin
 
 ---
 
+## What's New in v1.2.4
+
+- 🔒 **Locked Cage Boundary with Pure Internal Subdivision**:
+  - Tweaking Columns (U), Rows (V), or Height (W) now **strictly subdivides inside the existing cage** without altering the cage scale, position, or outer bounding box. No multiplying, exploding, or layer jumping.
+  - Sub-selection bounds in Edit Mode are preserved across operator redo ticks, preventing the cage from expanding to the whole model when adjusting resolution.
+- 🎚️ **Single-Layer (2D) Support (`min=1`)**:
+  - Minimum resolution is now `1` across all axes (`min=1`). Setting Height (W) to 1 gives a true single-layer 2D lattice plane for flat deformation without unwanted 3D volume tiers.
+- 📐 **Deformer-Isolated Bounds Calculation**:
+  - Automatically isolates evaluated base geometry from existing lattice modifiers during recalculation to eliminate compounding scale loops.
+
+---
+
 ## What's New in v1.2.3
 
 - 🧊 **Default 3x3x3 Resolution with Pure Internal Subdivision**:
