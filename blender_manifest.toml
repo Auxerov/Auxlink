@@ -1,9 +1,9 @@
 schema_version = "1.0.0"
 
 id = "auxlink"
-version = "1.1.1"
+version = "1.2.0"
 name = "Auxlink"
-tagline = "Modifier presets, stack editor & Auto Lattice for Blender"
+tagline = "Modifier presets, stack editor & Autolattice for Blender"
 maintainer = "Auxerov"
 type = "add-on"
 

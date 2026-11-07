@@ -2,20 +2,24 @@
 
 **Auxlink** is a modifier preset manager and character/organic modeling workflow tool for **Blender 5.0+** (and Blender 4.2+). It lets you save complex modifier stacks as named presets, edit and reorder presets directly from Blender Preferences, re-apply them to any selected object with a single click, and import/export presets in clean, human-readable YAML format without any external Python dependencies.
 
-Auxlink also includes **Auto Lattice**, tuned specifically for fast, tight-fitting deformation and shaping of **Skin modifier** meshes and character blockouts.
+Auxlink also includes **Autolattice**, tuned specifically for fast, tight-fitting deformation and shaping of **Skin modifier** meshes and character blockouts.
 
 ---
 
-## What's New in v1.1.1
+## What's New in v1.2.0
 
-- 🎛️ **Custom Grid Resolution (Columns & Rows)**:
-  - Clicking **Auto Lattice** now opens an interactive dialog where you can set **Columns (U)**, **Rows (V)**, and **Height (W)** before creating the lattice.
-  - Added a dedicated **Auxlink tab in the 3D Viewport Sidebar (N-panel)**: adjust columns, rows, and height live with interactive sliders!
-  - Added **Adjust Grid (Cols & Rows)...** and **Refit Lattice to Mesh** in the 3D Viewport context menu (`Right-Click > Auxlink`).
-- 📐 **Tight Mesh Bounding (No More Oversized Lattices)**:
-  - Rebuilt the bounds calculation to evaluate the real mesh surface geometry (`eval_obj.to_mesh().vertices`).
-  - Default margin set to **0% (Exact Fit)**: the lattice snaps flush to the actual surface of the model without oversized padding or artificial minimum clamping.
-  - Customizable Margin slider (-50% to +200%) allows tightening or expanding the cage as needed.
+- ⚡ **Renamed to "Autolattice"**:
+  - Unified name for quick F3 search (`F3 > Autolattice`) and context menu access.
+- 🎛️ **Real-Time Live Viewport Redo (Native Blender Operator Flow)**:
+  - Just like native Blender primitives (Cube, Cylinder, Lattice), adding Autolattice immediately opens the **Adjust Last Operation** panel in the bottom-left corner of the 3D Viewport (or `F9`).
+  - As you drag sliders for **Columns (U)**, **Rows (V)**, **Height (W)**, and **Margin**, the lattice cage and mesh deform **LIVE in real time** in the 3D Viewport!
+- 📐 **Tight Oriented Bounding Box**:
+  - The cage tightly wraps the evaluated mesh geometry (Skin, Subdivision, etc.) and aligns to the object's local rotation and orientation.
+  - Safe clamp guarantees no singular matrix errors even on 2D planes or thin shapes.
+- 🚀 **High-Performance NumPy Vectorization**:
+  - Bounds extraction accelerated with NumPy buffer operations (`foreach_get`), keeping operations instant even on dense meshes.
+- 🗂️ **Live Sidebar (N-Panel)**:
+  - The **Auxlink** tab in the 3D Viewport Sidebar displays real-time resolution sliders and one-click buttons for Edit, Refit, Apply, and Remove.
 
 ---
 
