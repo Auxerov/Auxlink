@@ -6,6 +6,17 @@ Auxlink also includes **Autolattice**, tuned specifically for fast, tight-fittin
 
 ---
 
+## What's New in v1.2.1
+
+- 📐 **1.3x Model Circumference Scaling (1.3 Katı)**:
+  - Autolattice now defaults to **1.3x (`1.30`)** of the model's dimensions, giving the exact sweet-spot clearance around the model's circumference/thickness without being unnecessarily huge.
+  - Added an interactive **Size Ratio** slider (0.5x to 3.0x, default `1.30`) in both the Adjust Last Operation panel and N-Panel sidebar.
+- 🎯 **Smart Edit-Mode Sub-Selection**:
+  - In Edit Mode, selecting a subset of vertices (e.g. an arm, leg, or limb) fits the Autolattice **specifically to the selected limb + its skin radius** (scaled by 1.3x), preventing giant full-body cages when you just want to shape a single part!
+  - If no sub-selection or in Object Mode, it seamlessly wraps the entire model.
+
+---
+
 ## What's New in v1.2.0
 
 - ⚡ **Renamed to "Autolattice"**:

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Auxlink",
     "author": "Auxerov",
-    "version": (1, 2, 0),
+    "version": (1, 2, 1),
     "blender": (5, 0, 0),
     "location": "3D Viewport > Right-Click > Auxlink  (also: Object menu / F3 search / N-Panel)",
     "description": "Save and edit modifier stacks as presets, YAML import/export, and Autolattice deformation",
@@ -1320,12 +1320,21 @@ class _AutolatticeCore:
         min=2,
         max=64,
     )
+    scale_factor: FloatProperty(
+        name="Size Ratio (1.3x)",
+        description="Lattice size relative to model (1.3 = 1.3x of model, matches model circumference with comfortable clearance)",
+        default=1.3,
+        min=0.5,
+        max=5.0,
+        precision=2,
+        step=5,
+    )
     margin: FloatProperty(
         name="Margin",
-        description="Extra margin around the evaluated mesh (0% = exact tight fit to the mesh)",
-        default=0.0,
+        description="Margin percentage (30% = 1.3x of model)",
+        default=0.3,
         min=-0.5,
-        max=2.0,
+        max=4.0,
         subtype='PERCENTAGE',
     )
     placement: EnumProperty(
@@ -1392,7 +1401,7 @@ class _AutolatticeCore:
 
         col_fit = layout.column(align=True)
         col_fit.label(text="Fit & Placement", icon='MOD_LATTICE')
-        col_fit.prop(self, "margin", text="Margin")
+        col_fit.prop(self, "scale_factor", text="Size Ratio (1.3x)")
         col_fit.prop(self, "interpolation", text="Interpolation")
         col_fit.prop(self, "placement", text="Stack Position")
 
@@ -1427,7 +1436,38 @@ class _AutolatticeCore:
             self.report({'ERROR'}, "Active object must be a Mesh or Autolattice")
             return {'CANCELLED'}
 
+        min_local = None
+        max_local = None
+
         if obj.mode == 'EDIT':
+            try:
+                import bmesh
+                bm = bmesh.from_edit_mesh(obj.data)
+                sel_verts = [v for v in bm.verts if v.select]
+                if 0 < len(sel_verts) < len(bm.verts):
+                    skin_layer = bm.verts.layers.skin.active if (hasattr(bm.verts.layers, 'skin') and bm.verts.layers.skin) else None
+                    sel_min = Vector((float('inf'), float('inf'), float('inf')))
+                    sel_max = Vector((float('-inf'), float('-inf'), float('-inf')))
+                    for v in sel_verts:
+                        rx, ry = (0.0, 0.0)
+                        if skin_layer is not None:
+                            try:
+                                r_val = v[skin_layer].radius
+                                rx = float(r_val[0])
+                                ry = float(r_val[1])
+                            except Exception:
+                                rx, ry = (0.0, 0.0)
+                        rz = max(rx, ry)
+                        sel_min.x = min(sel_min.x, v.co.x - rx)
+                        sel_min.y = min(sel_min.y, v.co.y - ry)
+                        sel_min.z = min(sel_min.z, v.co.z - rz)
+                        sel_max.x = max(sel_max.x, v.co.x + rx)
+                        sel_max.y = max(sel_max.y, v.co.y + ry)
+                        sel_max.z = max(sel_max.z, v.co.z + rz)
+                    min_local = sel_min
+                    max_local = sel_max
+            except Exception:
+                pass
             bpy.ops.object.mode_set(mode='OBJECT')
 
         # Clean up existing Autolattice modifier & lattice on this object if already present
@@ -1441,11 +1481,16 @@ class _AutolatticeCore:
                     if old_data and old_data.users == 0:
                         bpy.data.lattices.remove(old_data, do_unlink=True)
 
-        min_local, max_local, center_local, size_local = _calc_mesh_bounds_tight(obj, context)
+        if min_local is None or max_local is None:
+            min_local, max_local, center_local, size_local = _calc_mesh_bounds_tight(obj, context)
+        else:
+            center_local = (min_local + max_local) / 2.0
+            size_local = max_local - min_local
 
-        # Exact tight box: clamped only to avoid zero dimensions (e.g. 2D planes)
+        # 1.3x size (modelin çevresinin 1.3 katı)
+        factor = self.scale_factor if hasattr(self, "scale_factor") else (1.0 + getattr(self, "margin", 0.3))
         padded_size = Vector((
-            max(max(size_local[i], 1e-4) * (1.0 + self.margin), 1e-4)
+            max(max(size_local[i], 1e-4) * factor, 1e-4)
             for i in range(3)
         ))
 
@@ -1583,12 +1628,20 @@ class AUXLINK_OT_refit_lattice(bpy.types.Operator):
     bl_description = "Recalculate the mesh bounding box and re-fit the lattice tightly around the mesh"
     bl_options = {'REGISTER', 'UNDO'}
 
+    scale_factor: FloatProperty(
+        name="Size Ratio",
+        description="Lattice size relative to model (1.3 = 1.3x)",
+        default=1.3,
+        min=0.5,
+        max=5.0,
+        precision=2,
+    )
     margin: FloatProperty(
         name="Margin",
-        description="Extra margin (0% = exact tight fit)",
-        default=0.0,
+        description="Extra margin (30% = 1.3x of model)",
+        default=0.3,
         min=-0.5,
-        max=1.0,
+        max=4.0,
         subtype='PERCENTAGE'
     )
 
@@ -1604,8 +1657,9 @@ class AUXLINK_OT_refit_lattice(bpy.types.Operator):
             return {'CANCELLED'}
 
         min_local, max_local, center_local, size_local = _calc_mesh_bounds_tight(mesh_obj, context)
+        factor = self.scale_factor if hasattr(self, "scale_factor") else (1.0 + getattr(self, "margin", 0.3))
         padded_size = Vector((
-            max(max(size_local[i], 1e-4) * (1.0 + self.margin), 1e-4)
+            max(max(size_local[i], 1e-4) * factor, 1e-4)
             for i in range(3)
         ))
 
@@ -1619,7 +1673,7 @@ class AUXLINK_OT_refit_lattice(bpy.types.Operator):
                 @ Matrix.Translation(center_local)
                 @ Matrix.Diagonal(padded_size.to_4d())
             )
-        self.report({'INFO'}, "Autolattice tightly refitted to mesh")
+        self.report({'INFO'}, f"Autolattice refitted to {factor:.2f}x of mesh")
         return {'FINISHED'}
 
 
@@ -1795,9 +1849,10 @@ class AUXLINK_PT_lattice_panel(bpy.types.Panel):
             row.prop(lat_data, "points_v", text="Rows (V)")
             col.prop(lat_data, "points_w", text="Height (W)")
             col.prop(lat_data, "interpolation_type_u", text="Curve")
+            col.prop(lat_obj, "scale", text="Cage Scale")
 
             row_tools = box.row(align=True)
-            row_tools.operator(AUXLINK_OT_refit_lattice.bl_idname, text="Refit to Mesh", icon='FULLSCREEN_ENTER')
+            row_tools.operator(AUXLINK_OT_refit_lattice.bl_idname, text="Refit (1.3x)", icon='FULLSCREEN_ENTER')
             row_tools.operator(AUXLINK_OT_adjust_lattice.bl_idname, text="Scale / Grid", icon='ARROW_LEFTRIGHT')
 
             box.separator()
@@ -1970,7 +2025,10 @@ def unregister():
             except Exception:
                 pass
     for cls in reversed(classes):
-        bpy.utils.unregister_class(cls)
+        try:
+            bpy.utils.unregister_class(cls)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
