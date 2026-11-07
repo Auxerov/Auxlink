@@ -1,9 +1,9 @@
 bl_info = {
     "name": "Auxlink",
     "author": "Auxerov",
-    "version": (1, 1, 0),
+    "version": (1, 1, 1),
     "blender": (5, 0, 0),
-    "location": "3D Viewport > Right-Click > Auxlink  (also: Object menu / F3 search)",
+    "location": "3D Viewport > Right-Click > Auxlink  (also: Object menu / F3 search / N-Panel)",
     "description": "Save and edit modifier stacks as presets, YAML import/export, and Auto Lattice deformation",
     "category": "Object",
 }
@@ -446,7 +446,7 @@ def _serialize_value(prop, value):
             return None
         if isinstance(value, bpy.types.ID):
             return _id_ref(value)
-        return _SKIP  # nested structs (curve mappings, profiles...) are not supported
+        return _SKIP
     if t == 'COLLECTION':
         return _SKIP
     if t == 'ENUM':
@@ -483,7 +483,7 @@ def _idprop_to_plain(value):
         return value
     if hasattr(value, "to_list"):
         return value.to_list()
-    return _SKIP  # nested groups etc.
+    return _SKIP
 
 
 def serialize_modifier(mod):
@@ -618,7 +618,6 @@ class _Store:
 
     @property
     def default_path(self):
-        # Bundled factory default presets shipped alongside this file
         addon_dir = os.path.dirname(os.path.abspath(__file__))
         cand = os.path.join(addon_dir, "default_presets.yaml")
         if os.path.isfile(cand):
@@ -629,7 +628,6 @@ class _Store:
         self.presets = {}
         path = self.path
         if not os.path.isfile(path):
-            # First-time setup: load bundled default presets
             def_path = self.default_path
             if def_path and os.path.isfile(def_path):
                 try:
@@ -659,7 +657,6 @@ class _Store:
             f.write(content)
         os.replace(tmp, path)
 
-        # In development / repo environment, keep default_presets.yaml in sync
         def_path = self.default_path
         if def_path and os.path.isfile(def_path):
             try:
@@ -887,7 +884,6 @@ class AUXLINK_OT_rename_preset(bpy.types.Operator):
             self.report({'ERROR'}, f"Preset '{self.old_name}' not found")
             return {'CANCELLED'}
 
-        # Rebuild dictionary preserving key order
         new_presets = {}
         for k, v in store.presets.items():
             if k == self.old_name:
@@ -1238,57 +1234,114 @@ class AUXLINK_OT_import_presets(bpy.types.Operator, ImportHelper):
 
 
 # =============================================================================
-#  Auto Lattice Operators
+#  Auto Lattice Helpers & Operators
 # =============================================================================
+
+def _find_lattice_pair(context):
+    """Return (mesh_obj, lattice_mod, lattice_obj) from current context or selection."""
+    act = context.active_object
+    if not act:
+        return None, None, None
+
+    if act.type == 'MESH':
+        for m in reversed(act.modifiers):
+            if m.type == 'LATTICE' and m.object:
+                return act, m, m.object
+    elif act.type == 'LATTICE':
+        if act.parent and act.parent.type == 'MESH':
+            for m in act.parent.modifiers:
+                if m.type == 'LATTICE' and m.object == act:
+                    return act.parent, m, act
+        for obj in context.scene.objects:
+            if obj.type == 'MESH':
+                for m in obj.modifiers:
+                    if m.type == 'LATTICE' and m.object == act:
+                        return obj, m, act
+        return None, None, act
+    return None, None, None
+
+
+def _calc_mesh_bounds_tight(obj, context):
+    """
+    Calculate the exact local bounding box from evaluated mesh vertices
+    (after Skin, Subdivision, etc.) without artificial padding.
+    """
+    context.view_layer.update()
+    depsgraph = context.evaluated_depsgraph_get()
+    eval_obj = obj.evaluated_get(depsgraph)
+
+    min_local = None
+    max_local = None
+
+    try:
+        eval_mesh = eval_obj.to_mesh()
+        if eval_mesh and len(eval_mesh.vertices) > 0:
+            coords = [v.co for v in eval_mesh.vertices]
+            min_local = Vector((min(c[i] for c in coords) for i in range(3)))
+            max_local = Vector((max(c[i] for c in coords) for i in range(3)))
+    except Exception:
+        pass
+    finally:
+        eval_obj.to_mesh_clear()
+
+    if min_local is None or max_local is None:
+        bbox_corners = [Vector(c) for c in eval_obj.bound_box]
+        min_local = Vector((min(c[i] for c in bbox_corners) for i in range(3)))
+        max_local = Vector((max(c[i] for c in bbox_corners) for i in range(3)))
+
+    center_local = (min_local + max_local) / 2.0
+    size_local = max_local - min_local
+    return min_local, max_local, center_local, size_local
+
 
 class AUXLINK_OT_auto_lattice(bpy.types.Operator):
     bl_idname = "auxlink.auto_lattice"
-    bl_label = "Auto Lattice"
-    bl_description = "Fit a deformation lattice tightly around the evaluated mesh (great for Skin modifier modeling)"
+    bl_label = "Auto Lattice (Fit to Mesh)"
+    bl_description = "Fit a deformation lattice tightly around the mesh (ideal for Skin modifier modeling)"
     bl_options = {'REGISTER', 'UNDO'}
 
     points_u: IntProperty(
-        name="Resolution U (X)",
-        description="Number of lattice control points along X",
+        name="Columns (U / X)",
+        description="Number of lattice control points along X (Columns)",
         default=3,
         min=2,
         max=64,
     )
     points_v: IntProperty(
-        name="Resolution V (Y)",
-        description="Number of lattice control points along Y",
+        name="Rows (V / Y)",
+        description="Number of lattice control points along Y (Rows)",
         default=3,
         min=2,
         max=64,
     )
     points_w: IntProperty(
-        name="Resolution W (Z)",
-        description="Number of lattice control points along Z",
+        name="Height (W / Z)",
+        description="Number of lattice control points along Z (Height / Slices)",
         default=3,
         min=2,
         max=64,
     )
     margin: FloatProperty(
-        name="Padding Margin",
-        description="Extra margin around the evaluated mesh bounds",
-        default=0.08,
-        min=0.0,
-        max=1.0,
+        name="Margin",
+        description="Extra margin around the evaluated mesh (0% = exact tight fit to the mesh)",
+        default=0.0,
+        min=-0.5,
+        max=2.0,
         subtype='PERCENTAGE',
     )
     placement: EnumProperty(
-        name="Stack Position",
+        name="Modifier Position",
         description="Where to insert the Lattice modifier in the stack",
         items=[
-            ('AFTER_SKIN', "After Skin", "Place right after Skin modifier (before Subdivision for smoother deformation)"),
+            ('AFTER_SKIN', "After Skin", "Place right after Skin modifier (before Subdivision for smooth deformation)"),
             ('END', "Bottom of Stack", "Place at the bottom of the modifier stack"),
             ('TOP', "Top of Stack", "Place at the top of the modifier stack"),
         ],
         default='AFTER_SKIN',
     )
     interpolation: EnumProperty(
-        name="Interpolation",
-        description="Lattice interpolation method",
+        name="Curve Interpolation",
+        description="Lattice deformation curve method",
         items=[
             ('KEY_BSPLINE', "B-Spline", "Smooth B-Spline curves (best for organic skin)"),
             ('KEY_LINEAR', "Linear", "Linear sharp corners"),
@@ -1299,12 +1352,12 @@ class AUXLINK_OT_auto_lattice(bpy.types.Operator):
     )
     use_parent: BoolProperty(
         name="Parent to Mesh",
-        description="Parent the lattice to the mesh so it moves and rotates together",
+        description="Parent the lattice to the mesh so it moves and rotates with the object",
         default=True,
     )
     enter_edit_mode: BoolProperty(
         name="Enter Edit Mode",
-        description="Immediately enter Edit Mode on the new Lattice to start shaping",
+        description="Immediately enter Edit Mode on the Lattice so you can start shaping",
         default=True,
     )
 
@@ -1312,6 +1365,30 @@ class AUXLINK_OT_auto_lattice(bpy.types.Operator):
     def poll(cls, context):
         obj = context.active_object
         return obj is not None and obj.type == 'MESH'
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(
+            self, width=320, title="Auto Lattice (Fit to Mesh)", confirm_text="Create Lattice")
+
+    def draw(self, context):
+        layout = self.layout
+
+        box_res = layout.box()
+        box_res.label(text="Grid Resolution (Columns & Rows):", icon='GRID')
+        row = box_res.row(align=True)
+        row.prop(self, "points_u", text="Columns (U)")
+        row.prop(self, "points_v", text="Rows (V)")
+        box_res.prop(self, "points_w", text="Height / Slices (W)")
+
+        box_fit = layout.box()
+        box_fit.label(text="Tight Fit & Shape:", icon='MOD_LATTICE')
+        box_fit.prop(self, "margin", text="Margin (0% = Tight)")
+        box_fit.prop(self, "interpolation", text="Interpolation")
+
+        box_opt = layout.box()
+        box_opt.label(text="Placement & Setup:", icon='PREFERENCES')
+        box_opt.prop(self, "placement", text="Stack Position")
+        box_opt.prop(self, "enter_edit_mode", text="Enter Edit Mode Immediately")
 
     def execute(self, context):
         obj = context.active_object
@@ -1323,20 +1400,11 @@ class AUXLINK_OT_auto_lattice(bpy.types.Operator):
         if was_edit:
             bpy.ops.object.mode_set(mode='OBJECT')
 
-        depsgraph = context.evaluated_depsgraph_get()
-        eval_obj = obj.evaluated_get(depsgraph)
-        bbox_corners = [Vector(c) for c in eval_obj.bound_box]
-        if not bbox_corners:
-            self.report({'ERROR'}, "Could not evaluate mesh bounding box")
-            return {'CANCELLED'}
+        min_local, max_local, center_local, size_local = _calc_mesh_bounds_tight(obj, context)
 
-        min_local = Vector((min(c[i] for c in bbox_corners) for i in range(3)))
-        max_local = Vector((max(c[i] for c in bbox_corners) for i in range(3)))
-        center_local = (min_local + max_local) / 2.0
-        size_local = max_local - min_local
-
+        # Exact tight fit: size_local * (1.0 + margin), clamped only to tiny epsilon 1e-4
         padded_size = Vector((
-            max(size_local[i] * (1.0 + self.margin * 2.0), 0.05)
+            max(size_local[i] * (1.0 + self.margin), 1e-4)
             for i in range(3)
         ))
 
@@ -1400,31 +1468,121 @@ class AUXLINK_OT_auto_lattice(bpy.types.Operator):
             except Exception:
                 pass
 
-        self.report({'INFO'}, f"Auto Lattice created ({self.points_u}x{self.points_v}x{self.points_w})")
+        self.report({'INFO'}, f"Auto Lattice created: {self.points_u} cols x {self.points_v} rows x {self.points_w} height")
         return {'FINISHED'}
 
 
-def _find_lattice_pair(context):
-    """Return (mesh_obj, lattice_mod, lattice_obj) from current context or selection."""
-    act = context.active_object
-    if not act:
-        return None, None, None
+class AUXLINK_OT_adjust_lattice(bpy.types.Operator):
+    bl_idname = "auxlink.adjust_lattice"
+    bl_label = "Adjust Lattice Grid"
+    bl_description = "Change the columns, rows, height, and scale of the active lattice"
+    bl_options = {'REGISTER', 'UNDO'}
 
-    if act.type == 'MESH':
-        for m in reversed(act.modifiers):
-            if m.type == 'LATTICE' and m.object:
-                return act, m, m.object
-    elif act.type == 'LATTICE':
-        if act.parent and act.parent.type == 'MESH':
-            for m in act.parent.modifiers:
-                if m.type == 'LATTICE' and m.object == act:
-                    return act.parent, m, act
-        for obj in context.scene.objects:
-            if obj.type == 'MESH':
-                for m in obj.modifiers:
-                    if m.type == 'LATTICE' and m.object == act:
-                        return obj, m, act
-    return None, None, None
+    points_u: IntProperty(name="Columns (U)", default=3, min=2, max=64)
+    points_v: IntProperty(name="Rows (V)", default=3, min=2, max=64)
+    points_w: IntProperty(name="Height (W)", default=3, min=2, max=64)
+    scale_multiplier: FloatProperty(name="Scale Adjustment", default=1.0, min=0.1, max=5.0)
+
+    @classmethod
+    def poll(cls, context):
+        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+        return lat_obj is not None
+
+    def invoke(self, context, event):
+        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+        if lat_obj and lat_obj.data:
+            self.points_u = lat_obj.data.points_u
+            self.points_v = lat_obj.data.points_v
+            self.points_w = lat_obj.data.points_w
+        self.scale_multiplier = 1.0
+        return context.window_manager.invoke_props_dialog(self, width=280, title="Adjust Lattice Grid")
+
+    def draw(self, context):
+        layout = self.layout
+        col = layout.column(align=True)
+        col.prop(self, "points_u", text="Columns (U / X)")
+        col.prop(self, "points_v", text="Rows (V / Y)")
+        col.prop(self, "points_w", text="Height (W / Z)")
+        layout.separator()
+        layout.prop(self, "scale_multiplier", text="Scale Multiplier")
+
+    def execute(self, context):
+        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+        if not lat_obj or not lat_obj.data:
+            self.report({'ERROR'}, "No active lattice found")
+            return {'CANCELLED'}
+        lat_data = lat_obj.data
+        lat_data.points_u = self.points_u
+        lat_data.points_v = self.points_v
+        lat_data.points_w = self.points_w
+        if self.scale_multiplier != 1.0:
+            lat_obj.scale *= self.scale_multiplier
+        self.report({'INFO'}, f"Lattice resolution updated to {self.points_u}x{self.points_v}x{self.points_w}")
+        return {'FINISHED'}
+
+
+class AUXLINK_OT_refit_lattice(bpy.types.Operator):
+    bl_idname = "auxlink.refit_lattice"
+    bl_label = "Refit Lattice to Mesh"
+    bl_description = "Recalculate the mesh bounding box and re-fit the lattice tightly around the mesh"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    margin: FloatProperty(
+        name="Margin",
+        description="Extra margin (0% = exact tight fit)",
+        default=0.0,
+        min=-0.5,
+        max=1.0,
+        subtype='PERCENTAGE'
+    )
+
+    @classmethod
+    def poll(cls, context):
+        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+        return mesh_obj is not None and lat_obj is not None
+
+    def execute(self, context):
+        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+        if not mesh_obj or not lat_obj:
+            self.report({'ERROR'}, "Lattice pair not found")
+            return {'CANCELLED'}
+
+        min_local, max_local, center_local, size_local = _calc_mesh_bounds_tight(mesh_obj, context)
+        padded_size = Vector((max(size_local[i] * (1.0 + self.margin), 1e-4) for i in range(3)))
+
+        if lat_obj.parent == mesh_obj:
+            lat_obj.location = center_local
+            lat_obj.scale = padded_size
+        else:
+            lat_obj.matrix_world = (
+                mesh_obj.matrix_world
+                @ Matrix.Translation(center_local)
+                @ Matrix.Diagonal(padded_size.to_4d())
+            )
+        self.report({'INFO'}, "Lattice tightly refitted to mesh")
+        return {'FINISHED'}
+
+
+class AUXLINK_OT_edit_lattice_mode(bpy.types.Operator):
+    bl_idname = "auxlink.edit_lattice_mode"
+    bl_label = "Edit Lattice"
+    bl_description = "Select the lattice and enter Edit Mode to deform control points"
+    bl_options = {'INTERNAL'}
+
+    def execute(self, context):
+        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+        if not lat_obj:
+            self.report({'ERROR'}, "No lattice found")
+            return {'CANCELLED'}
+        for o in context.selected_objects:
+            o.select_set(False)
+        context.view_layer.objects.active = lat_obj
+        lat_obj.select_set(True)
+        try:
+            bpy.ops.object.mode_set(mode='EDIT')
+        except Exception:
+            pass
+        return {'FINISHED'}
 
 
 class AUXLINK_OT_apply_lattice(bpy.types.Operator):
@@ -1502,7 +1660,7 @@ class AUXLINK_OT_remove_lattice(bpy.types.Operator):
 
 
 # =============================================================================
-#  Menus
+#  Menus and 3D Viewport Panels
 # =============================================================================
 
 class AUXLINK_MT_add_preset(bpy.types.Menu):
@@ -1529,10 +1687,12 @@ class AUXLINK_MT_main(bpy.types.Menu):
         layout.menu(AUXLINK_MT_add_preset.bl_idname, text="Add Modifier Preset", icon='PRESET')
 
         layout.separator()
-        layout.operator(AUXLINK_OT_auto_lattice.bl_idname, text="Auto Lattice (Fit to Mesh)", icon='OUTLINER_DATA_LATTICE')
+        layout.operator(AUXLINK_OT_auto_lattice.bl_idname, text="Auto Lattice (Fit to Mesh)...", icon='OUTLINER_DATA_LATTICE')
 
         mesh_obj, mod, lat_obj = _find_lattice_pair(context)
-        if mesh_obj and mod:
+        if lat_obj:
+            layout.operator(AUXLINK_OT_adjust_lattice.bl_idname, text="Adjust Grid (Cols & Rows)...", icon='GRID')
+            layout.operator(AUXLINK_OT_refit_lattice.bl_idname, text="Refit Lattice to Mesh", icon='FULLSCREEN_ENTER')
             row = layout.row(align=True)
             row.operator(AUXLINK_OT_apply_lattice.bl_idname, text="Apply Lattice", icon='CHECKMARK')
             row.operator(AUXLINK_OT_remove_lattice.bl_idname, text="Remove Lattice", icon='CANCEL')
@@ -1545,6 +1705,56 @@ def _draw_auxlink_entry(self, context):
 
 
 _APPEND_TO = ("VIEW3D_MT_object_context_menu", "VIEW3D_MT_object")
+
+
+class AUXLINK_PT_lattice_panel(bpy.types.Panel):
+    bl_label = "Auto Lattice"
+    bl_idname = "AUXLINK_PT_lattice_panel"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = 'Auxlink'
+
+    def draw(self, context):
+        layout = self.layout
+        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+
+        if not mesh_obj and not lat_obj:
+            box = layout.box()
+            box.label(text="Select a Mesh object", icon='INFO')
+            return
+
+        if lat_obj and lat_obj.data:
+            lat_data = lat_obj.data
+            box = layout.box()
+            box.label(text=f"Lattice: {lat_obj.name}", icon='OUTLINER_DATA_LATTICE')
+
+            col = box.column(align=True)
+            col.label(text="Grid Resolution:", icon='GRID')
+            row = col.row(align=True)
+            row.prop(lat_data, "points_u", text="Columns (U)")
+            row.prop(lat_data, "points_v", text="Rows (V)")
+            col.prop(lat_data, "points_w", text="Height (W)")
+            col.prop(lat_data, "interpolation_type_u", text="Curve")
+
+            row_tools = box.row(align=True)
+            row_tools.operator(AUXLINK_OT_refit_lattice.bl_idname, text="Refit to Mesh", icon='FULLSCREEN_ENTER')
+            row_tools.operator(AUXLINK_OT_adjust_lattice.bl_idname, text="Scale / Grid", icon='ARROW_LEFTRIGHT')
+
+            box.separator()
+            row_mode = box.row(align=True)
+            is_in_edit = (context.active_object == lat_obj and context.mode in {'EDIT', 'EDIT_LATTICE'})
+            if is_in_edit:
+                row_mode.operator("object.mode_set", text="Finish (Object Mode)", icon='CHECKMARK').mode = 'OBJECT'
+            else:
+                row_mode.operator(AUXLINK_OT_edit_lattice_mode.bl_idname, text="Edit Lattice Points", icon='EDITMODE_HLT')
+
+            row_act = box.row(align=True)
+            row_act.operator(AUXLINK_OT_apply_lattice.bl_idname, text="Apply", icon='CHECKMARK')
+            row_act.operator(AUXLINK_OT_remove_lattice.bl_idname, text="Remove", icon='CANCEL')
+        else:
+            box = layout.box()
+            box.label(text=f"Target: {mesh_obj.name}", icon='MESH_DATA')
+            box.operator(AUXLINK_OT_auto_lattice.bl_idname, text="Fit Auto Lattice...", icon='OUTLINER_DATA_LATTICE')
 
 
 # =============================================================================
@@ -1563,7 +1773,6 @@ class AUXLINK_Preferences(bpy.types.AddonPreferences):
     def draw(self, context):
         layout = self.layout
 
-        # --- Top toolbar: stats & actions ---
         row = layout.row(align=True)
         row.label(text="Presets (%d)" % len(store.presets), icon='PRESET')
         row.operator(AUXLINK_OT_import_presets.bl_idname, text="Import YAML", icon='IMPORT')
@@ -1627,7 +1836,6 @@ class AUXLINK_Preferences(bpy.types.AddonPreferences):
                             up_op.preset_name = name
                             up_op.mod_index = idx
                             up_op.direction = 'UP'
-                            up_op_enabled = (idx > 0)
 
                             dn_op = m_row.operator(AUXLINK_OT_move_preset_modifier.bl_idname, text="", icon='TRIA_DOWN')
                             dn_op.preset_name = name
@@ -1670,10 +1878,14 @@ classes = (
     AUXLINK_OT_export_presets,
     AUXLINK_OT_import_presets,
     AUXLINK_OT_auto_lattice,
+    AUXLINK_OT_adjust_lattice,
+    AUXLINK_OT_refit_lattice,
+    AUXLINK_OT_edit_lattice_mode,
     AUXLINK_OT_apply_lattice,
     AUXLINK_OT_remove_lattice,
     AUXLINK_MT_add_preset,
     AUXLINK_MT_main,
+    AUXLINK_PT_lattice_panel,
     AUXLINK_Preferences,
 )
 
