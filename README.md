@@ -6,6 +6,20 @@ Auxlink also includes **Autolattice**, tuned specifically for fast, tight-fittin
 
 ---
 
+## What's New in v1.2.7
+
+- 🔒 **Fixed Transform Matrix & Pure Internal Subdivision**:
+  - Resolution changes strictly preserve the cage transform (`matrix_basis` & `matrix_parent_inverse`), preventing any cage scale compounding, doubling, or shifts when tweaking U/V/W.
+  - Sizing and resolution adjustment are completely decoupled; standard 2x2x2 initial cage fitted to 1.3x object dimensions.
+- 👁️ **Safe View Layer Collection Linking**:
+  - Automatically identifies active, non-excluded view layer collections to link lattice objects, guaranteeing the lattice is never hidden or placed into an excluded collection.
+  - Automatically selects all 8 lattice points on creation and switches to Edit mode for immediate deformation.
+- 🧹 **Robust Cleanup & 2D Flat Plane Protection**:
+  - Cleans up both existing modifiers and orphaned/ghost lattice objects with `auxlink_base_size`.
+  - Independent per-axis minimum thickness ensures 2D planar meshes never collapse along Z.
+
+---
+
 ## What's New in v1.2.6
 
 - 🚀 **Instant Lattice Visibility & Auto Edit Mode**:
