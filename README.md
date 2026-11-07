@@ -6,6 +6,15 @@ Auxlink also includes **Autolattice**, tuned specifically for fast, tight-fittin
 
 ---
 
+## What's New in v1.2.8
+
+- 🪟 **Default 2x2x2 & Native Resolution Tool Popup**:
+  - Running **Autolattice** instantly creates a clean 2x2x2 lattice (fitted 1.3x tightly around the mesh) and immediately pops up Blender's native Lattice Resolution Tool.
+  - Subdividing Resolution U (X), V (Y), or W (Z) in the popup directly drives Blender's lattice engine in real-time without modifying the cage bounds or recomputing geometry.
+  - Dedicated popup resolution tool (`Popup Tool...`) also accessible anytime from the N-Panel and menus.
+
+---
+
 ## What's New in v1.2.7
 
 - 🔒 **Fixed Transform Matrix & Pure Internal Subdivision**:

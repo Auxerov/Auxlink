@@ -20,7 +20,7 @@ echo "[Auxlink] 3. Building release zips..."
 cd "$REPO_DIR"
 rm -f auxlink*.zip
 blender --command extension build --output-filepath auxlink.zip
-cp auxlink.zip auxlink-1.2.7.zip
-echo "  -> Built auxlink.zip and auxlink-1.2.7.zip"
+cp auxlink.zip auxlink-1.2.8.zip
+echo "  -> Built auxlink.zip and auxlink-1.2.8.zip"
 
 echo "[Auxlink] Done! Blender is ready."

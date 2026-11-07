@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Auxlink",
     "author": "Auxerov",
-    "version": (1, 2, 7),
+    "version": (1, 2, 8),
     "blender": (5, 0, 0),
     "location": "3D Viewport > Right-Click > Auxlink  (also: Shift+A > Auxlink / Object menu / F3 / N-Panel)",
     "description": "Save and edit modifier stacks as presets, YAML import/export, and Autolattice deformation",
@@ -1406,7 +1406,6 @@ def _cleanup_old_autolattice(obj):
             obj.modifiers.remove(m)
             _remove_lattice_object(old)
 
-    # Ghost lattices left over from broken runs (parented to this mesh, no modifier uses them)
     used = {m.object for m in obj.modifiers if m.type == 'LATTICE' and m.object}
     for o in list(bpy.data.objects):
         if (o.type == 'LATTICE' and o.parent == obj
@@ -1432,176 +1431,163 @@ def _safe_collection(obj, context):
     return context.scene.collection
 
 
-def _set_lattice_resolution(lat_obj, u, v, w):
-    """Change U/V/W while keeping the cage transform (bounds) perfectly locked."""
-    saved_basis = lat_obj.matrix_basis.copy()
-    saved_parent_inv = lat_obj.matrix_parent_inverse.copy()
-    lat_data = lat_obj.data
-    lat_data.points_u = u
-    lat_data.points_v = v
-    lat_data.points_w = w
-    lat_obj.matrix_parent_inverse = saved_parent_inv
-    lat_obj.matrix_basis = saved_basis
+def _create_autolattice(context, scale_factor=AUTOLATTICE_FACTOR, interpolation='KEY_BSPLINE', placement='AFTER_SKIN'):
+    """Create a standard 2x2x2 Autolattice fitted 1.3x around target mesh and enter EDIT_LATTICE mode."""
+    obj = _resolve_target_mesh(context)
+    if obj is None:
+        return None, None
+
+    sub_min = sub_max = None
+    if obj.mode == 'EDIT':
+        sub_min, sub_max = _calc_subselection_bounds(obj)
+        bpy.ops.object.mode_set(mode='OBJECT')
+    elif context.mode != 'OBJECT':
+        try:
+            bpy.ops.object.mode_set(mode='OBJECT')
+        except Exception:
+            pass
+
+    _cleanup_old_autolattice(obj)
+
+    if sub_min is not None and sub_max is not None:
+        center = (sub_min + sub_max) / 2.0
+        size = sub_max - sub_min
+    else:
+        center, size = _get_bounds(obj, context, allow_subselection=False)
+
+    padded = _padded_size(size, scale_factor)
+
+    lat_name = f"{obj.name}_Lattice"
+    lat_data = bpy.data.lattices.new(name=lat_name)
+    lat_data.points_u = 2
+    lat_data.points_v = 2
+    lat_data.points_w = 2
+    lat_data.interpolation_type_u = interpolation
+    lat_data.interpolation_type_v = interpolation
+    lat_data.interpolation_type_w = interpolation
+
+    lat_obj = bpy.data.objects.new(name=lat_name, object_data=lat_data)
+    lat_obj.show_in_front = True
+    lat_obj.hide_viewport = False
+    lat_obj.hide_render = True
+    lat_obj["auxlink_base_size"] = list(size)
+    lat_obj["auxlink_center"] = list(center)
+
+    _safe_collection(obj, context).objects.link(lat_obj)
+
+    lat_obj.parent = obj
+    _apply_cage_transform(lat_obj, obj, center, padded)
+
+    lat_mod = obj.modifiers.new(name="AutoLattice", type='LATTICE')
+    lat_mod.object = lat_obj
+
+    count = len(obj.modifiers)
+    cur = count - 1
+    target = cur
+    if placement == 'AFTER_SKIN':
+        skin_idx = -1
+        for i, m in enumerate(obj.modifiers):
+            if m.type == 'SKIN':
+                skin_idx = i
+        if skin_idx != -1:
+            target = skin_idx + 1
+    elif placement == 'TOP':
+        target = 0
+    target = max(0, min(target, count - 1))
+    if target != cur:
+        try:
+            obj.modifiers.move(cur, target)
+        except Exception:
+            pass
+
+    try:
+        for p in lat_data.points:
+            p.select = True
+    except Exception:
+        pass
+
+    context.view_layer.update()
+
+    for o in context.selected_objects:
+        o.select_set(False)
+    context.view_layer.objects.active = lat_obj
+    lat_obj.select_set(True)
+
+    try:
+        bpy.ops.object.mode_set(mode='EDIT')
+    except Exception:
+        pass
+
+    return obj, lat_obj
+
+
+def _draw_lattice_resolution_ui(layout, context):
+    """Draw the exact Blender Lattice Resolution Tool (properties_data_lattice style)."""
+    mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+    if not lat_obj or not lat_obj.data:
+        layout.label(text="No active lattice found", icon='ERROR')
+        return
+
+    lat = lat_obj.data
+    layout.use_property_split = True
+    layout.use_property_decorate = False
+
+    box = layout.box()
+    box.label(text=f"Lattice: {lat_obj.name}", icon='OUTLINER_DATA_LATTICE')
+
+    col = box.column(align=True)
+    col.label(text="Resolution (Subdivisions):", icon='GRID')
+    col.prop(lat, "points_u", text="Resolution U")
+    col.prop(lat, "points_v", text="V")
+    col.prop(lat, "points_w", text="W")
+
+    box.separator()
+
+    col = box.column(align=True)
+    col.label(text="Interpolation:", icon='CURVE_DATA')
+    col.prop(lat, "interpolation_type_u", text="Interpolation U")
+    col.prop(lat, "interpolation_type_v", text="V")
+    col.prop(lat, "interpolation_type_w", text="W")
+
+    box.separator()
+    col.prop(lat, "use_outside", text="Outside Only")
 
 
 class AUXLINK_OT_autolattice(bpy.types.Operator):
     bl_idname = "auxlink.autolattice"
     bl_label = "Autolattice"
-    bl_description = "Create a standard 2x2x2 lattice fitted 1.3x around the mesh"
+    bl_description = "Create standard 2x2x2 lattice fitted 1.3x around mesh and popup resolution tool"
     bl_options = {'REGISTER', 'UNDO'}
 
-    points_u: IntProperty(name="Columns (U / X)", default=2, min=1, max=64)
-    points_v: IntProperty(name="Rows (V / Y)", default=2, min=1, max=64)
-    points_w: IntProperty(name="Height (W / Z)", default=2, min=1, max=64)
     scale_factor: FloatProperty(
         name="Size Ratio", default=AUTOLATTICE_FACTOR, min=0.5, max=5.0, precision=2
     )
-    interpolation: EnumProperty(
-        name="Interpolation",
-        items=[
-            ('KEY_BSPLINE', "B-Spline", "Smooth B-Spline curves"),
-            ('KEY_LINEAR', "Linear", "Linear"),
-            ('KEY_CARDINAL', "Cardinal", "Cardinal"),
-            ('KEY_CATMULL_ROM', "Catmull-Rom", "Catmull-Rom"),
-        ],
-        default='KEY_BSPLINE',
-    )
-    placement: EnumProperty(
-        name="Stack Position",
-        items=[
-            ('AFTER_SKIN', "After Skin", "Right after the Skin modifier"),
-            ('END', "Bottom of Stack", "Bottom of the modifier stack"),
-            ('TOP', "Top of Stack", "Top of the modifier stack"),
-        ],
-        default='AFTER_SKIN',
-    )
-    use_parent: BoolProperty(name="Parent to Mesh", default=True)
-    enter_edit_mode: BoolProperty(name="Enter Edit Mode", default=True)
 
     @classmethod
     def poll(cls, context):
         return _resolve_target_mesh(context) is not None
 
+    def invoke(self, context, event):
+        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+        if not lat_obj:
+            mesh_obj, lat_obj = _create_autolattice(context, scale_factor=self.scale_factor)
+            if not lat_obj:
+                self.report({'ERROR'}, "Failed to create Autolattice")
+                return {'CANCELLED'}
+            self.report({'INFO'}, f"Autolattice 2x2x2 created for '{mesh_obj.name}'")
+        return context.window_manager.invoke_props_dialog(self, width=280)
+
     def draw(self, context):
-        layout = self.layout
-        layout.use_property_split = True
-        layout.use_property_decorate = False
-
-        col = layout.column(align=True)
-        col.label(text="Grid Resolution", icon='GRID')
-        col.prop(self, "points_u")
-        col.prop(self, "points_v")
-        col.prop(self, "points_w")
-
-        layout.separator()
-        col = layout.column(align=True)
-        col.label(text="Fit & Placement", icon='MOD_LATTICE')
-        col.prop(self, "scale_factor")
-        col.prop(self, "interpolation")
-        col.prop(self, "placement")
-
-        layout.separator()
-        col = layout.column(align=True)
-        col.prop(self, "use_parent")
-        col.prop(self, "enter_edit_mode")
+        _draw_lattice_resolution_ui(self.layout, context)
 
     def execute(self, context):
-        obj = _resolve_target_mesh(context)
-        if obj is None:
-            self.report({'ERROR'}, "Active object must be a Mesh or an Autolattice")
-            return {'CANCELLED'}
-
-        # Sub-selection bounds are only valid if the MESH is in Edit mode
-        sub_min = sub_max = None
-        if obj.mode == 'EDIT':
-            sub_min, sub_max = _calc_subselection_bounds(obj)
-            bpy.ops.object.mode_set(mode='OBJECT')
-        elif context.mode != 'OBJECT':
-            try:
-                bpy.ops.object.mode_set(mode='OBJECT')
-            except Exception:
-                pass
-
-        # Always start clean: no ghost modifier / lattice objects
-        _cleanup_old_autolattice(obj)
-
-        if sub_min is not None and sub_max is not None:
-            center = (sub_min + sub_max) / 2.0
-            size = sub_max - sub_min
-        else:
-            center, size = _get_bounds(obj, context, allow_subselection=False)
-
-        padded = _padded_size(size, self.scale_factor)
-
-        lat_name = f"{obj.name}_Lattice"
-        lat_data = bpy.data.lattices.new(name=lat_name)
-        lat_data.points_u = self.points_u
-        lat_data.points_v = self.points_v
-        lat_data.points_w = self.points_w
-        lat_data.interpolation_type_u = self.interpolation
-        lat_data.interpolation_type_v = self.interpolation
-        lat_data.interpolation_type_w = self.interpolation
-
-        lat_obj = bpy.data.objects.new(name=lat_name, object_data=lat_data)
-        lat_obj.show_in_front = True
-        lat_obj.hide_viewport = False
-        lat_obj.hide_render = True
-        lat_obj["auxlink_base_size"] = list(size)
-        lat_obj["auxlink_center"] = list(center)
-
-        _safe_collection(obj, context).objects.link(lat_obj)
-
-        if self.use_parent:
-            lat_obj.parent = obj
-        _apply_cage_transform(lat_obj, obj, center, padded)
-
-        lat_mod = obj.modifiers.new(name="AutoLattice", type='LATTICE')
-        lat_mod.object = lat_obj
-
-        # Modifier stack position (no bpy.ops needed)
-        count = len(obj.modifiers)
-        cur = count - 1
-        target = cur
-        if self.placement == 'AFTER_SKIN':
-            skin_idx = -1
-            for i, m in enumerate(obj.modifiers):
-                if m.type == 'SKIN':
-                    skin_idx = i
-            if skin_idx != -1:
-                target = skin_idx + 1
-        elif self.placement == 'TOP':
-            target = 0
-        target = max(0, min(target, count - 1))
-        if target != cur:
-            try:
-                obj.modifiers.move(cur, target)
-            except Exception:
-                pass
-
-        # Select all lattice points so the 8 corners are highlighted
-        try:
-            for p in lat_data.points:
-                p.select = True
-        except Exception:
-            pass
-
-        context.view_layer.update()
-
-        for o in context.selected_objects:
-            o.select_set(False)
-        context.view_layer.objects.active = lat_obj
-        lat_obj.select_set(True)
-
-        if self.enter_edit_mode:
-            try:
-                bpy.ops.object.mode_set(mode='EDIT')
-            except Exception:
-                pass
-
-        self.report(
-            {'INFO'},
-            f"Autolattice: {self.points_u}x{self.points_v}x{self.points_w} @ {self.scale_factor:.2f}x"
-        )
+        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+        if not lat_obj:
+            mesh_obj, lat_obj = _create_autolattice(context, scale_factor=self.scale_factor)
+            if not lat_obj:
+                self.report({'ERROR'}, "Failed to create Autolattice")
+                return {'CANCELLED'}
+            self.report({'INFO'}, f"Autolattice 2x2x2 created for '{mesh_obj.name}'")
         return {'FINISHED'}
 
 
@@ -1616,19 +1602,22 @@ class AUXLINK_OT_auto_lattice(bpy.types.Operator):
     def poll(cls, context):
         return _resolve_target_mesh(context) is not None
 
+    def invoke(self, context, event):
+        return bpy.ops.auxlink.autolattice('INVOKE_DEFAULT')
+
     def execute(self, context):
         return bpy.ops.auxlink.autolattice()
 
 
 class AUXLINK_OT_adjust_lattice(bpy.types.Operator):
     bl_idname = "auxlink.adjust_lattice"
-    bl_label = "Adjust Lattice Grid"
-    bl_description = "Subdivide the lattice interior; the outer cage stays locked"
+    bl_label = "Lattice Resolution"
+    bl_description = "Popup the Lattice Resolution tool to subdivide control points"
     bl_options = {'REGISTER', 'UNDO'}
 
-    points_u: IntProperty(name="Columns (U / X)", default=2, min=1, max=64)
-    points_v: IntProperty(name="Rows (V / Y)", default=2, min=1, max=64)
-    points_w: IntProperty(name="Height (W / Z)", default=2, min=1, max=64)
+    points_u: IntProperty(name="Resolution U", default=2, min=1, max=64)
+    points_v: IntProperty(name="Resolution V", default=2, min=1, max=64)
+    points_w: IntProperty(name="Resolution W", default=2, min=1, max=64)
 
     @classmethod
     def poll(cls, context):
@@ -1643,10 +1632,7 @@ class AUXLINK_OT_adjust_lattice(bpy.types.Operator):
         return context.window_manager.invoke_props_dialog(self, width=280)
 
     def draw(self, context):
-        col = self.layout.column(align=True)
-        col.prop(self, "points_u")
-        col.prop(self, "points_v")
-        col.prop(self, "points_w")
+        _draw_lattice_resolution_ui(self.layout, context)
 
     def execute(self, context):
         lat_obj = _find_lattice_pair(context)[2]
@@ -1654,16 +1640,14 @@ class AUXLINK_OT_adjust_lattice(bpy.types.Operator):
             self.report({'ERROR'}, "No active lattice found")
             return {'CANCELLED'}
 
-        was_edit = (lat_obj.mode == 'EDIT')
-        if was_edit:
-            bpy.ops.object.mode_set(mode='OBJECT')
+        if self.properties.is_property_set("points_u"):
+            lat_obj.data.points_u = self.points_u
+        if self.properties.is_property_set("points_v"):
+            lat_obj.data.points_v = self.points_v
+        if self.properties.is_property_set("points_w"):
+            lat_obj.data.points_w = self.points_w
 
-        _set_lattice_resolution(lat_obj, self.points_u, self.points_v, self.points_w)
-
-        if was_edit:
-            bpy.ops.object.mode_set(mode='EDIT')
-
-        self.report({'INFO'}, f"Lattice resolution: {self.points_u}x{self.points_v}x{self.points_w}")
+        self.report({'INFO'}, f"Lattice resolution: {lat_obj.data.points_u}x{lat_obj.data.points_v}x{lat_obj.data.points_w}")
         return {'FINISHED'}
 
 
@@ -1791,6 +1775,7 @@ class AUXLINK_OT_remove_lattice(bpy.types.Operator):
         return {'FINISHED'}
 
 
+
 # =============================================================================
 #  Menus and 3D Viewport Panels
 # =============================================================================
@@ -1861,23 +1846,28 @@ class AUXLINK_PT_lattice_panel(bpy.types.Panel):
             return
 
         if lat_obj and lat_obj.data:
-            lat_data = lat_obj.data
+            lat = lat_obj.data
             box = layout.box()
             box.label(text=f"Lattice: {lat_obj.name}", icon='OUTLINER_DATA_LATTICE')
 
             col = box.column(align=True)
-            col.label(text="Grid Resolution (Live):", icon='GRID')
-            row = col.row(align=True)
-            row.prop(lat_data, "points_u", text="Columns (U)")
-            row.prop(lat_data, "points_v", text="Rows (V)")
-            col.prop(lat_data, "points_w", text="Height (W)")
-            col.prop(lat_data, "interpolation_type_u", text="Curve")
-            col.prop(lat_obj, "scale", text="Cage Scale")
+            col.label(text="Resolution (Subdivisions):", icon='GRID')
+            col.prop(lat, "points_u", text="Resolution U")
+            col.prop(lat, "points_v", text="Resolution V")
+            col.prop(lat, "points_w", text="Resolution W")
 
+            box.separator()
+            col = box.column(align=True)
+            col.label(text="Interpolation:", icon='CURVE_DATA')
+            col.prop(lat, "interpolation_type_u", text="Interpolation U")
+            col.prop(lat, "interpolation_type_v", text="V")
+            col.prop(lat, "interpolation_type_w", text="W")
+            col.prop(lat, "use_outside", text="Outside Only")
+
+            box.separator()
             row_tools = box.row(align=True)
+            row_tools.operator(AUXLINK_OT_adjust_lattice.bl_idname, text="Popup Tool...", icon='WINDOW')
             row_tools.operator(AUXLINK_OT_refit_lattice.bl_idname, text="Refit (1.3x)", icon='FULLSCREEN_ENTER')
-            row_tools.operator(AUXLINK_OT_autolattice.bl_idname, text="Recreate", icon='FILE_REFRESH')
-            row_tools.operator(AUXLINK_OT_adjust_lattice.bl_idname, text="Dialog...", icon='GRID')
 
             box.separator()
             row_mode = box.row(align=True)
