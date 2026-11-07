@@ -1,13 +1,14 @@
 bl_info = {
     "name": "Auxlink",
     "author": "Auxerov",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (5, 0, 0),
     "location": "3D Viewport > Right-Click > Auxlink  (also: Object menu / F3 search)",
-    "description": "Save modifier stacks as presets, add them back with one click, import/export them as YAML",
+    "description": "Save and edit modifier stacks as presets, YAML import/export, and Auto Lattice deformation",
     "category": "Object",
 }
 
+import copy
 import json
 import math
 import os
@@ -15,15 +16,16 @@ import re
 import shutil
 
 import bpy
-from bpy.props import BoolProperty, EnumProperty, StringProperty
+from bpy.props import BoolProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 from bpy_extras.io_utils import ExportHelper, ImportHelper
+import mathutils
+from mathutils import Matrix, Vector
 
 
 # =============================================================================
 #  Minimal YAML (subset) reader / writer  -- no external dependencies
 #  Supports: block mappings, block sequences, flow lists/maps (single line),
-#  quoted/plain scalars, comments.  Enough for Auxlink's own format and for
-#  hand-edited files that stay within the same style.
+#  quoted/plain scalars, comments.
 # =============================================================================
 # --- YAML BEGIN ---
 
@@ -498,7 +500,6 @@ def serialize_modifier(mod):
         if data is not _SKIP:
             props[pid] = data
 
-    # Only some modifiers (Geometry Nodes) support custom IDProperties; others raise TypeError.
     custom = {}
     try:
         keys = list(mod.keys())
@@ -536,7 +537,6 @@ def apply_modifier_data(obj, md, warnings):
         return None
 
     props = md.get("properties") or {}
-    # node_group must be assigned first so the node inputs exist afterwards
     for key in sorted(props, key=lambda k: k != "node_group"):
         prop = mod.bl_rna.properties.get(key)
         if prop is None or prop.is_readonly:
@@ -616,11 +616,31 @@ class _Store:
     def path(self):
         return os.path.join(self.directory, "presets.yaml")
 
+    @property
+    def default_path(self):
+        # Bundled factory default presets shipped alongside this file
+        addon_dir = os.path.dirname(os.path.abspath(__file__))
+        cand = os.path.join(addon_dir, "default_presets.yaml")
+        if os.path.isfile(cand):
+            return cand
+        return ""
+
     def load(self):
         self.presets = {}
         path = self.path
         if not os.path.isfile(path):
+            # First-time setup: load bundled default presets
+            def_path = self.default_path
+            if def_path and os.path.isfile(def_path):
+                try:
+                    with open(def_path, "r", encoding="utf-8") as f:
+                        self.presets = presets_from_document(parse_yaml(f.read()))
+                    self.save()
+                    return
+                except Exception as exc:
+                    print("[Auxlink] Could not read default presets: %s" % exc)
             return
+
         try:
             with open(path, "r", encoding="utf-8") as f:
                 self.presets = presets_from_document(parse_yaml(f.read()))
@@ -634,9 +654,19 @@ class _Store:
     def save(self):
         path = self.path
         tmp = path + ".tmp"
+        content = dump_yaml(presets_to_document(self.presets), YAML_HEADER)
         with open(tmp, "w", encoding="utf-8", newline="\n") as f:
-            f.write(dump_yaml(presets_to_document(self.presets), YAML_HEADER))
+            f.write(content)
         os.replace(tmp, path)
+
+        # In development / repo environment, keep default_presets.yaml in sync
+        def_path = self.default_path
+        if def_path and os.path.isfile(def_path):
+            try:
+                with open(def_path, "w", encoding="utf-8", newline="\n") as f:
+                    f.write(content)
+            except Exception:
+                pass
 
 
 store = _Store()
@@ -644,13 +674,31 @@ store = _Store()
 
 def _redraw_all():
     wm = bpy.context.window_manager
+    if wm is None:
+        return
     for window in wm.windows:
-        for area in window.screen.areas:
-            area.tag_redraw()
+        screen = window.screen
+        if screen:
+            for area in screen.areas:
+                area.tag_redraw()
+
+
+def get_preferences(context=None):
+    if context is None:
+        context = bpy.context
+    addon_name = __package__ or __name__
+    prefs = context.preferences.addons.get(addon_name)
+    if prefs:
+        return prefs.preferences
+    for name, addon in context.preferences.addons.items():
+        if name == "auxlink" or name.endswith(".auxlink") or name == addon_name:
+            if addon.preferences:
+                return addon.preferences
+    return None
 
 
 # =============================================================================
-#  Operators
+#  Preset Operators
 # =============================================================================
 
 class AUXLINK_OT_save_preset(bpy.types.Operator):
@@ -796,8 +844,309 @@ class AUXLINK_OT_delete_preset(bpy.types.Operator):
             except OSError as exc:
                 self.report({'ERROR'}, "Could not write presets file: %s" % exc)
                 return {'CANCELLED'}
+            prefs = get_preferences(context)
+            if prefs and prefs.active_preset == self.preset_name:
+                prefs.active_preset = ""
             self.report({'INFO'}, "Deleted preset '%s'" % self.preset_name)
         _redraw_all()
+        return {'FINISHED'}
+
+
+class AUXLINK_OT_rename_preset(bpy.types.Operator):
+    bl_idname = "auxlink.rename_preset"
+    bl_label = "Rename Preset"
+    bl_description = "Rename this preset"
+    bl_options = {'INTERNAL'}
+
+    old_name: StringProperty(options={'SKIP_SAVE', 'HIDDEN'})
+    new_name: StringProperty(name="New Name", default="", options={'SKIP_SAVE'})
+
+    def invoke(self, context, event):
+        self.new_name = self.old_name
+        return context.window_manager.invoke_props_dialog(
+            self, width=320, title="Rename Preset", confirm_text="Rename")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "new_name", text="Name")
+        clean = self.new_name.strip()
+        if clean in store.presets and clean != self.old_name:
+            layout.label(text="A preset with this name already exists!", icon='ERROR')
+
+    def execute(self, context):
+        clean = self.new_name.strip()
+        if not clean:
+            self.report({'ERROR'}, "Preset name cannot be empty")
+            return {'CANCELLED'}
+        if clean == self.old_name:
+            return {'FINISHED'}
+        if clean in store.presets:
+            self.report({'ERROR'}, f"Preset '{clean}' already exists")
+            return {'CANCELLED'}
+        if self.old_name not in store.presets:
+            self.report({'ERROR'}, f"Preset '{self.old_name}' not found")
+            return {'CANCELLED'}
+
+        # Rebuild dictionary preserving key order
+        new_presets = {}
+        for k, v in store.presets.items():
+            if k == self.old_name:
+                new_presets[clean] = v
+            else:
+                new_presets[k] = v
+        store.presets = new_presets
+        store.save()
+
+        prefs = get_preferences(context)
+        if prefs and prefs.active_preset == self.old_name:
+            prefs.active_preset = clean
+
+        self.report({'INFO'}, f"Renamed '{self.old_name}' to '{clean}'")
+        _redraw_all()
+        return {'FINISHED'}
+
+
+class AUXLINK_OT_duplicate_preset(bpy.types.Operator):
+    bl_idname = "auxlink.duplicate_preset"
+    bl_label = "Duplicate Preset"
+    bl_description = "Create a copy of this preset"
+    bl_options = {'INTERNAL'}
+
+    preset_name: StringProperty(options={'SKIP_SAVE', 'HIDDEN'})
+
+    def execute(self, context):
+        if self.preset_name not in store.presets:
+            self.report({'ERROR'}, "Preset not found")
+            return {'CANCELLED'}
+
+        base_name = self.preset_name + " Copy"
+        new_name = base_name
+        counter = 2
+        while new_name in store.presets:
+            new_name = f"{base_name} {counter}"
+            counter += 1
+
+        store.presets[new_name] = copy.deepcopy(store.presets[self.preset_name])
+        store.save()
+
+        prefs = get_preferences(context)
+        if prefs:
+            prefs.active_preset = new_name
+
+        self.report({'INFO'}, f"Duplicated preset as '{new_name}'")
+        _redraw_all()
+        return {'FINISHED'}
+
+
+class AUXLINK_OT_select_preset_for_edit(bpy.types.Operator):
+    bl_idname = "auxlink.select_preset_for_edit"
+    bl_label = "Edit Preset"
+    bl_description = "Inspect and edit this preset's modifiers"
+    bl_options = {'INTERNAL'}
+
+    preset_name: StringProperty(options={'SKIP_SAVE', 'HIDDEN'})
+
+    def execute(self, context):
+        prefs = get_preferences(context)
+        if prefs:
+            if prefs.active_preset == self.preset_name:
+                prefs.active_preset = ""
+            else:
+                prefs.active_preset = self.preset_name
+        _redraw_all()
+        return {'FINISHED'}
+
+
+class AUXLINK_OT_move_preset_modifier(bpy.types.Operator):
+    bl_idname = "auxlink.move_preset_modifier"
+    bl_label = "Move Modifier"
+    bl_description = "Move this modifier up or down inside the preset stack"
+    bl_options = {'INTERNAL'}
+
+    preset_name: StringProperty(options={'SKIP_SAVE', 'HIDDEN'})
+    mod_index: IntProperty(options={'SKIP_SAVE', 'HIDDEN'})
+    direction: EnumProperty(
+        items=[('UP', "Up", ""), ('DOWN', "Down", "")],
+        options={'SKIP_SAVE', 'HIDDEN'}
+    )
+
+    def execute(self, context):
+        preset = store.presets.get(self.preset_name)
+        if not preset:
+            return {'CANCELLED'}
+        mods = preset.get("modifiers", [])
+        idx = self.mod_index
+        if self.direction == 'UP' and idx > 0:
+            mods[idx], mods[idx - 1] = mods[idx - 1], mods[idx]
+        elif self.direction == 'DOWN' and idx < len(mods) - 1:
+            mods[idx], mods[idx + 1] = mods[idx + 1], mods[idx]
+        else:
+            return {'CANCELLED'}
+
+        store.save()
+        _redraw_all()
+        return {'FINISHED'}
+
+
+class AUXLINK_OT_remove_preset_modifier(bpy.types.Operator):
+    bl_idname = "auxlink.remove_preset_modifier"
+    bl_label = "Remove Modifier from Preset"
+    bl_description = "Remove this modifier from the preset"
+    bl_options = {'INTERNAL'}
+
+    preset_name: StringProperty(options={'SKIP_SAVE', 'HIDDEN'})
+    mod_index: IntProperty(options={'SKIP_SAVE', 'HIDDEN'})
+
+    def execute(self, context):
+        preset = store.presets.get(self.preset_name)
+        if not preset:
+            return {'CANCELLED'}
+        mods = preset.get("modifiers", [])
+        if 0 <= self.mod_index < len(mods):
+            removed = mods.pop(self.mod_index)
+            store.save()
+            self.report({'INFO'}, f"Removed modifier '{removed.get('name')}' from preset")
+            _redraw_all()
+            return {'FINISHED'}
+        return {'CANCELLED'}
+
+
+class AUXLINK_OT_rename_preset_modifier(bpy.types.Operator):
+    bl_idname = "auxlink.rename_preset_modifier"
+    bl_label = "Rename Modifier"
+    bl_description = "Rename this modifier inside the preset"
+    bl_options = {'INTERNAL'}
+
+    preset_name: StringProperty(options={'SKIP_SAVE', 'HIDDEN'})
+    mod_index: IntProperty(options={'SKIP_SAVE', 'HIDDEN'})
+    new_name: StringProperty(name="Modifier Name", default="", options={'SKIP_SAVE'})
+
+    def invoke(self, context, event):
+        preset = store.presets.get(self.preset_name)
+        if preset and 0 <= self.mod_index < len(preset.get("modifiers", [])):
+            self.new_name = preset["modifiers"][self.mod_index].get("name", "")
+        return context.window_manager.invoke_props_dialog(
+            self, width=300, title="Rename Modifier", confirm_text="OK")
+
+    def draw(self, context):
+        self.layout.prop(self, "new_name", text="Name")
+
+    def execute(self, context):
+        clean = self.new_name.strip()
+        if not clean:
+            self.report({'ERROR'}, "Name cannot be empty")
+            return {'CANCELLED'}
+        preset = store.presets.get(self.preset_name)
+        if not preset:
+            return {'CANCELLED'}
+        mods = preset.get("modifiers", [])
+        if 0 <= self.mod_index < len(mods):
+            mods[self.mod_index]["name"] = clean
+            store.save()
+            _redraw_all()
+            return {'FINISHED'}
+        return {'CANCELLED'}
+
+
+class AUXLINK_OT_update_preset_from_active(bpy.types.Operator):
+    bl_idname = "auxlink.update_preset_from_active"
+    bl_label = "Update from Active Object"
+    bl_description = "Overwrite this preset with the modifier stack of the currently active object"
+    bl_options = {'INTERNAL'}
+
+    preset_name: StringProperty(options={'SKIP_SAVE', 'HIDDEN'})
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None and len(context.active_object.modifiers) > 0
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(
+            self, width=340, title="Update Preset", confirm_text="Overwrite")
+
+    def draw(self, context):
+        obj = context.active_object
+        usable, _ = collect_modifiers(obj, False)
+        layout = self.layout
+        layout.label(text=f"Replace '{self.preset_name}' with {len(usable)} modifier(s)", icon='QUESTION')
+        layout.label(text=f"Source: {obj.name}", icon='OBJECT_DATA')
+
+    def execute(self, context):
+        obj = context.active_object
+        usable, skipped = collect_modifiers(obj, False)
+        if not usable:
+            self.report({'ERROR'}, "No usable modifiers on active object")
+            return {'CANCELLED'}
+
+        store.presets[self.preset_name] = {"modifiers": [serialize_modifier(m) for m in usable]}
+        store.save()
+        self.report({'INFO'}, f"Updated preset '{self.preset_name}' ({len(usable)} modifier(s))")
+        _redraw_all()
+        return {'FINISHED'}
+
+
+class AUXLINK_OT_restore_defaults(bpy.types.Operator):
+    bl_idname = "auxlink.restore_defaults"
+    bl_label = "Restore Default Presets"
+    bl_description = "Reload factory default presets shipped with Auxlink"
+    bl_options = {'INTERNAL'}
+
+    mode: EnumProperty(
+        name="Restore Mode",
+        items=[
+            ('MERGE', "Merge (Keep Existing)", "Add default presets while keeping your own custom presets"),
+            ('REPLACE_ALL', "Reset All", "Remove all current presets and restore only factory defaults"),
+        ],
+        default='MERGE',
+    )
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(
+            self, width=340, title="Restore Default Presets", confirm_text="Restore")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "mode", expand=True)
+
+    def execute(self, context):
+        def_path = store.default_path
+        if not def_path or not os.path.isfile(def_path):
+            self.report({'ERROR'}, "Default presets file not found")
+            return {'CANCELLED'}
+
+        try:
+            with open(def_path, "r", encoding="utf-8") as f:
+                defaults = presets_from_document(parse_yaml(f.read()))
+        except Exception as exc:
+            self.report({'ERROR'}, f"Failed to read defaults: {exc}")
+            return {'CANCELLED'}
+
+        if self.mode == 'REPLACE_ALL':
+            store.presets = defaults
+            imported = len(defaults)
+        else:
+            imported = 0
+            for k, v in defaults.items():
+                if k not in store.presets:
+                    store.presets[k] = v
+                    imported += 1
+
+        store.save()
+        self.report({'INFO'}, f"Restored default presets ({imported} added)")
+        _redraw_all()
+        return {'FINISHED'}
+
+
+class AUXLINK_OT_open_presets_file(bpy.types.Operator):
+    bl_idname = "auxlink.open_presets_file"
+    bl_label = "Edit in Text Editor"
+    bl_description = "Open the presets.yaml file in the system default text editor"
+    bl_options = {'INTERNAL'}
+
+    def execute(self, context):
+        if not os.path.isfile(store.path):
+            store.save()
+        bpy.ops.wm.path_open(filepath=store.path)
         return {'FINISHED'}
 
 
@@ -889,6 +1238,270 @@ class AUXLINK_OT_import_presets(bpy.types.Operator, ImportHelper):
 
 
 # =============================================================================
+#  Auto Lattice Operators
+# =============================================================================
+
+class AUXLINK_OT_auto_lattice(bpy.types.Operator):
+    bl_idname = "auxlink.auto_lattice"
+    bl_label = "Auto Lattice"
+    bl_description = "Fit a deformation lattice tightly around the evaluated mesh (great for Skin modifier modeling)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    points_u: IntProperty(
+        name="Resolution U (X)",
+        description="Number of lattice control points along X",
+        default=3,
+        min=2,
+        max=64,
+    )
+    points_v: IntProperty(
+        name="Resolution V (Y)",
+        description="Number of lattice control points along Y",
+        default=3,
+        min=2,
+        max=64,
+    )
+    points_w: IntProperty(
+        name="Resolution W (Z)",
+        description="Number of lattice control points along Z",
+        default=3,
+        min=2,
+        max=64,
+    )
+    margin: FloatProperty(
+        name="Padding Margin",
+        description="Extra margin around the evaluated mesh bounds",
+        default=0.08,
+        min=0.0,
+        max=1.0,
+        subtype='PERCENTAGE',
+    )
+    placement: EnumProperty(
+        name="Stack Position",
+        description="Where to insert the Lattice modifier in the stack",
+        items=[
+            ('AFTER_SKIN', "After Skin", "Place right after Skin modifier (before Subdivision for smoother deformation)"),
+            ('END', "Bottom of Stack", "Place at the bottom of the modifier stack"),
+            ('TOP', "Top of Stack", "Place at the top of the modifier stack"),
+        ],
+        default='AFTER_SKIN',
+    )
+    interpolation: EnumProperty(
+        name="Interpolation",
+        description="Lattice interpolation method",
+        items=[
+            ('KEY_BSPLINE', "B-Spline", "Smooth B-Spline curves (best for organic skin)"),
+            ('KEY_LINEAR', "Linear", "Linear sharp corners"),
+            ('KEY_CARDINAL', "Cardinal", "Cardinal curves"),
+            ('KEY_CATMULL_ROM', "Catmull-Rom", "Catmull-Rom curves"),
+        ],
+        default='KEY_BSPLINE',
+    )
+    use_parent: BoolProperty(
+        name="Parent to Mesh",
+        description="Parent the lattice to the mesh so it moves and rotates together",
+        default=True,
+    )
+    enter_edit_mode: BoolProperty(
+        name="Enter Edit Mode",
+        description="Immediately enter Edit Mode on the new Lattice to start shaping",
+        default=True,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'MESH'
+
+    def execute(self, context):
+        obj = context.active_object
+        if obj is None or obj.type != 'MESH':
+            self.report({'ERROR'}, "Active object must be a Mesh")
+            return {'CANCELLED'}
+
+        was_edit = (obj.mode == 'EDIT')
+        if was_edit:
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        depsgraph = context.evaluated_depsgraph_get()
+        eval_obj = obj.evaluated_get(depsgraph)
+        bbox_corners = [Vector(c) for c in eval_obj.bound_box]
+        if not bbox_corners:
+            self.report({'ERROR'}, "Could not evaluate mesh bounding box")
+            return {'CANCELLED'}
+
+        min_local = Vector((min(c[i] for c in bbox_corners) for i in range(3)))
+        max_local = Vector((max(c[i] for c in bbox_corners) for i in range(3)))
+        center_local = (min_local + max_local) / 2.0
+        size_local = max_local - min_local
+
+        padded_size = Vector((
+            max(size_local[i] * (1.0 + self.margin * 2.0), 0.05)
+            for i in range(3)
+        ))
+
+        lat_name = f"{obj.name}_Lattice"
+        lat_data = bpy.data.lattices.new(name=lat_name)
+        lat_data.points_u = self.points_u
+        lat_data.points_v = self.points_v
+        lat_data.points_w = self.points_w
+        lat_data.interpolation_type_u = self.interpolation
+        lat_data.interpolation_type_v = self.interpolation
+        lat_data.interpolation_type_w = self.interpolation
+
+        lat_obj = bpy.data.objects.new(name=lat_name, object_data=lat_data)
+        lat_obj.show_in_front = True
+
+        target_col = obj.users_collection[0] if obj.users_collection else context.collection
+        target_col.objects.link(lat_obj)
+
+        if self.use_parent:
+            lat_obj.parent = obj
+            lat_obj.location = center_local
+            lat_obj.rotation_euler = (0.0, 0.0, 0.0)
+            lat_obj.scale = padded_size
+        else:
+            lat_obj.matrix_world = (
+                obj.matrix_world
+                @ Matrix.Translation(center_local)
+                @ Matrix.Diagonal(padded_size.to_4d())
+            )
+
+        lat_mod = obj.modifiers.new(name="AutoLattice", type='LATTICE')
+        lat_mod.object = lat_obj
+
+        if self.placement == 'AFTER_SKIN':
+            skin_idx = -1
+            for idx, m in enumerate(obj.modifiers):
+                if m.type == 'SKIN':
+                    skin_idx = idx
+            if skin_idx != -1:
+                target_idx = skin_idx + 1
+                try:
+                    bpy.ops.object.modifier_move_to_index(modifier=lat_mod.name, index=target_idx)
+                except Exception:
+                    pass
+        elif self.placement == 'TOP':
+            try:
+                bpy.ops.object.modifier_move_to_index(modifier=lat_mod.name, index=0)
+            except Exception:
+                pass
+
+        context.view_layer.update()
+
+        for o in context.selected_objects:
+            o.select_set(False)
+        context.view_layer.objects.active = lat_obj
+        lat_obj.select_set(True)
+
+        if self.enter_edit_mode:
+            try:
+                bpy.ops.object.mode_set(mode='EDIT')
+            except Exception:
+                pass
+
+        self.report({'INFO'}, f"Auto Lattice created ({self.points_u}x{self.points_v}x{self.points_w})")
+        return {'FINISHED'}
+
+
+def _find_lattice_pair(context):
+    """Return (mesh_obj, lattice_mod, lattice_obj) from current context or selection."""
+    act = context.active_object
+    if not act:
+        return None, None, None
+
+    if act.type == 'MESH':
+        for m in reversed(act.modifiers):
+            if m.type == 'LATTICE' and m.object:
+                return act, m, m.object
+    elif act.type == 'LATTICE':
+        if act.parent and act.parent.type == 'MESH':
+            for m in act.parent.modifiers:
+                if m.type == 'LATTICE' and m.object == act:
+                    return act.parent, m, act
+        for obj in context.scene.objects:
+            if obj.type == 'MESH':
+                for m in obj.modifiers:
+                    if m.type == 'LATTICE' and m.object == act:
+                        return obj, m, act
+    return None, None, None
+
+
+class AUXLINK_OT_apply_lattice(bpy.types.Operator):
+    bl_idname = "auxlink.apply_lattice"
+    bl_label = "Apply Lattice"
+    bl_description = "Apply the lattice modifier to the mesh and delete the lattice object"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+        return mesh_obj is not None and mod is not None
+
+    def execute(self, context):
+        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+        if not mesh_obj or not mod:
+            self.report({'ERROR'}, "No active lattice modifier found")
+            return {'CANCELLED'}
+
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        context.view_layer.objects.active = mesh_obj
+        mod_name = mod.name
+
+        try:
+            bpy.ops.object.modifier_apply(modifier=mod_name)
+        except Exception as exc:
+            self.report({'ERROR'}, f"Failed to apply modifier: {exc}")
+            return {'CANCELLED'}
+
+        if lat_obj:
+            lat_data = lat_obj.data
+            bpy.data.objects.remove(lat_obj, do_unlink=True)
+            if lat_data and lat_data.users == 0:
+                bpy.data.lattices.remove(lat_data, do_unlink=True)
+
+        mesh_obj.select_set(True)
+        self.report({'INFO'}, f"Applied lattice deformation to '{mesh_obj.name}'")
+        return {'FINISHED'}
+
+
+class AUXLINK_OT_remove_lattice(bpy.types.Operator):
+    bl_idname = "auxlink.remove_lattice"
+    bl_label = "Remove Lattice"
+    bl_description = "Remove the lattice modifier and delete the lattice object without applying"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+        return mesh_obj is not None and mod is not None
+
+    def execute(self, context):
+        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+        if not mesh_obj or not mod:
+            self.report({'ERROR'}, "No active lattice modifier found")
+            return {'CANCELLED'}
+
+        if context.mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+
+        mesh_obj.modifiers.remove(mod)
+
+        if lat_obj:
+            lat_data = lat_obj.data
+            bpy.data.objects.remove(lat_obj, do_unlink=True)
+            if lat_data and lat_data.users == 0:
+                bpy.data.lattices.remove(lat_data, do_unlink=True)
+
+        context.view_layer.objects.active = mesh_obj
+        mesh_obj.select_set(True)
+        self.report({'INFO'}, f"Removed lattice from '{mesh_obj.name}'")
+        return {'FINISHED'}
+
+
+# =============================================================================
 #  Menus
 # =============================================================================
 
@@ -915,6 +1528,15 @@ class AUXLINK_MT_main(bpy.types.Menu):
         layout.operator(AUXLINK_OT_save_preset.bl_idname, text="Save Modifier Preset", icon='PRESET_NEW')
         layout.menu(AUXLINK_MT_add_preset.bl_idname, text="Add Modifier Preset", icon='PRESET')
 
+        layout.separator()
+        layout.operator(AUXLINK_OT_auto_lattice.bl_idname, text="Auto Lattice (Fit to Mesh)", icon='OUTLINER_DATA_LATTICE')
+
+        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+        if mesh_obj and mod:
+            row = layout.row(align=True)
+            row.operator(AUXLINK_OT_apply_lattice.bl_idname, text="Apply Lattice", icon='CHECKMARK')
+            row.operator(AUXLINK_OT_remove_lattice.bl_idname, text="Remove Lattice", icon='CANCEL')
+
 
 def _draw_auxlink_entry(self, context):
     layout = self.layout
@@ -932,30 +1554,98 @@ _APPEND_TO = ("VIEW3D_MT_object_context_menu", "VIEW3D_MT_object")
 class AUXLINK_Preferences(bpy.types.AddonPreferences):
     bl_idname = __package__ or __name__
 
+    active_preset: StringProperty(
+        name="Active Preset",
+        description="Preset currently open for detailed editing in Preferences",
+        default="",
+    )
+
     def draw(self, context):
         layout = self.layout
 
-        box = layout.box()
-        box.label(text="Saved Presets (%d)" % len(store.presets), icon='PRESET')
-        if not store.presets:
-            box.label(text="Nothing here yet: right-click a model > Auxlink > Save Modifier Preset", icon='INFO')
-        for name, data in store.presets.items():
-            row = box.row(align=True)
-            row.label(text=name, icon='MODIFIER_DATA')
-            info = row.row(align=True)
-            info.alignment = 'RIGHT'
-            info.enabled = False
-            info.label(text=", ".join(m["name"] for m in data["modifiers"]) or "(empty)")
-            op = row.operator(AUXLINK_OT_delete_preset.bl_idname, text="", icon='TRASH')
-            op.preset_name = name
-
+        # --- Top toolbar: stats & actions ---
         row = layout.row(align=True)
+        row.label(text="Presets (%d)" % len(store.presets), icon='PRESET')
         row.operator(AUXLINK_OT_import_presets.bl_idname, text="Import YAML", icon='IMPORT')
         row.operator(AUXLINK_OT_export_presets.bl_idname, text="Export YAML", icon='EXPORT')
+        row.operator(AUXLINK_OT_restore_defaults.bl_idname, text="Restore Defaults", icon='RECOVER_LAST')
         row.operator(AUXLINK_OT_reload_presets.bl_idname, text="Reload", icon='FILE_REFRESH')
 
+        box = layout.box()
+        if not store.presets:
+            box.label(text="No presets saved yet. Right-click a mesh > Auxlink > Save Modifier Preset", icon='INFO')
+        else:
+            for name, data in store.presets.items():
+                is_active = (self.active_preset == name)
+                p_box = box.box() if is_active else box
+
+                row = p_box.row(align=True)
+                edit_icon = 'DOWNARROW_HLT' if is_active else 'RIGHTARROW'
+                sel_op = row.operator(AUXLINK_OT_select_preset_for_edit.bl_idname, text="", icon=edit_icon, emboss=False)
+                sel_op.preset_name = name
+
+                row.label(text=name, icon='MODIFIER_DATA')
+
+                mods = data.get("modifiers", [])
+                summary = " → ".join(m["name"] for m in mods) if mods else "(empty)"
+                info = row.row(align=True)
+                info.alignment = 'RIGHT'
+                info.enabled = False
+                info.label(text=summary)
+
+                ren_op = row.operator(AUXLINK_OT_rename_preset.bl_idname, text="", icon='GREASEPENCIL')
+                ren_op.old_name = name
+
+                dup_op = row.operator(AUXLINK_OT_duplicate_preset.bl_idname, text="", icon='DUPLICATE')
+                dup_op.preset_name = name
+
+                del_op = row.operator(AUXLINK_OT_delete_preset.bl_idname, text="", icon='TRASH')
+                del_op.preset_name = name
+
+                if is_active:
+                    col = p_box.column(align=False)
+                    col.separator(factor=0.5)
+
+                    bar = col.row(align=True)
+                    bar.label(text=f"Editing Modifier Stack: {name}", icon='PREFERENCES')
+
+                    apply_op = bar.operator(AUXLINK_OT_add_preset.bl_idname, text="Apply to Selected", icon='CHECKMARK')
+                    apply_op.preset_name = name
+
+                    upd_op = bar.operator(AUXLINK_OT_update_preset_from_active.bl_idname, text="Update from Active Object", icon='FILE_REFRESH')
+                    upd_op.preset_name = name
+
+                    mod_box = col.box()
+                    if not mods:
+                        mod_box.label(text="This preset has no modifiers.", icon='INFO')
+                    else:
+                        for idx, mod in enumerate(mods):
+                            m_row = mod_box.row(align=True)
+                            m_row.label(text=f"{idx + 1}.  {mod['name']}  [{mod['type']}]", icon='MODIFIER')
+
+                            up_op = m_row.operator(AUXLINK_OT_move_preset_modifier.bl_idname, text="", icon='TRIA_UP')
+                            up_op.preset_name = name
+                            up_op.mod_index = idx
+                            up_op.direction = 'UP'
+                            up_op_enabled = (idx > 0)
+
+                            dn_op = m_row.operator(AUXLINK_OT_move_preset_modifier.bl_idname, text="", icon='TRIA_DOWN')
+                            dn_op.preset_name = name
+                            dn_op.mod_index = idx
+                            dn_op.direction = 'DOWN'
+
+                            mren_op = m_row.operator(AUXLINK_OT_rename_preset_modifier.bl_idname, text="", icon='GREASEPENCIL')
+                            mren_op.preset_name = name
+                            mren_op.mod_index = idx
+
+                            rm_op = m_row.operator(AUXLINK_OT_remove_preset_modifier.bl_idname, text="", icon='X')
+                            rm_op.preset_name = name
+                            rm_op.mod_index = idx
+
+        layout.separator()
         row = layout.row(align=True)
         row.label(text=store.path, icon='FILE_TEXT')
+        row.operator(AUXLINK_OT_open_presets_file.bl_idname, text="Edit in Text Editor", icon='TEXT')
         row.operator("wm.path_open", text="Open Folder", icon='FILE_FOLDER').filepath = store.directory
 
 
@@ -967,9 +1657,21 @@ classes = (
     AUXLINK_OT_save_preset,
     AUXLINK_OT_add_preset,
     AUXLINK_OT_delete_preset,
+    AUXLINK_OT_rename_preset,
+    AUXLINK_OT_duplicate_preset,
+    AUXLINK_OT_select_preset_for_edit,
+    AUXLINK_OT_move_preset_modifier,
+    AUXLINK_OT_remove_preset_modifier,
+    AUXLINK_OT_rename_preset_modifier,
+    AUXLINK_OT_update_preset_from_active,
+    AUXLINK_OT_restore_defaults,
+    AUXLINK_OT_open_presets_file,
     AUXLINK_OT_reload_presets,
     AUXLINK_OT_export_presets,
     AUXLINK_OT_import_presets,
+    AUXLINK_OT_auto_lattice,
+    AUXLINK_OT_apply_lattice,
+    AUXLINK_OT_remove_lattice,
     AUXLINK_MT_add_preset,
     AUXLINK_MT_main,
     AUXLINK_Preferences,
