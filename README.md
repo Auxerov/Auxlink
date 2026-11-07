@@ -6,6 +6,14 @@ Auxlink also includes **Autolattice**, tuned specifically for fast, tight-fittin
 
 ---
 
+## What's New in v1.2.2
+
+- 🎛️ **Default 2x2x2 Lattice Resolution (U=2, V=2, W=2)**:
+  - Autolattice now defaults to an 8-corner bounding cube (`2x2x2`), providing the simplest, most intuitive control cage for quick shaping and organic deformation.
+  - Columns (U), Rows (V), and Height (W) can still be interactively increased to any resolution via the Adjust Last Operation panel or N-Panel sidebar.
+
+---
+
 ## What's New in v1.2.1
 
 - 📐 **1.3x Model Circumference Scaling (1.3 Katı)**:

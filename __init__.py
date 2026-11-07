@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Auxlink",
     "author": "Auxerov",
-    "version": (1, 2, 1),
+    "version": (1, 2, 2),
     "blender": (5, 0, 0),
     "location": "3D Viewport > Right-Click > Auxlink  (also: Object menu / F3 search / N-Panel)",
     "description": "Save and edit modifier stacks as presets, YAML import/export, and Autolattice deformation",
@@ -1302,21 +1302,21 @@ class _AutolatticeCore:
     points_u: IntProperty(
         name="Columns (U / X)",
         description="Number of lattice control points along X (Columns)",
-        default=3,
+        default=2,
         min=2,
         max=64,
     )
     points_v: IntProperty(
         name="Rows (V / Y)",
         description="Number of lattice control points along Y (Rows)",
-        default=3,
+        default=2,
         min=2,
         max=64,
     )
     points_w: IntProperty(
         name="Height (W / Z)",
         description="Number of lattice control points along Z (Height / Slices)",
-        default=3,
+        default=2,
         min=2,
         max=64,
     )
@@ -1579,9 +1579,9 @@ class AUXLINK_OT_adjust_lattice(bpy.types.Operator):
     bl_description = "Change the columns, rows, height, and scale of the active lattice"
     bl_options = {'REGISTER', 'UNDO'}
 
-    points_u: IntProperty(name="Columns (U)", default=3, min=2, max=64)
-    points_v: IntProperty(name="Rows (V)", default=3, min=2, max=64)
-    points_w: IntProperty(name="Height (W)", default=3, min=2, max=64)
+    points_u: IntProperty(name="Columns (U)", default=2, min=2, max=64)
+    points_v: IntProperty(name="Rows (V)", default=2, min=2, max=64)
+    points_w: IntProperty(name="Height (W)", default=2, min=2, max=64)
     scale_multiplier: FloatProperty(name="Scale Adjustment", default=1.0, min=0.1, max=5.0)
 
     @classmethod
