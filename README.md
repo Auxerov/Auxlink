@@ -6,6 +6,15 @@ Auxlink also includes **Autolattice**, tuned specifically for fast, tight-fittin
 
 ---
 
+## What's New in v1.2.5
+
+- 🧊 **Standard Normal Lattice Default (2x2x2)**:
+  - Autolattice now assigns a standard clean 8-corner bounding cage (`2x2x2`) fitted to the model (1.3x circumference).
+  - Control points (U/V/W) can then be subdivided cleanly inside the locked cage boundary via the sidebar (N-Panel) or Lattice properties.
+  - Interactive invoke automatically preserves existing subdivision counts instead of overwriting them.
+
+---
+
 ## What's New in v1.2.4
 
 - 🔒 **Locked Cage Boundary with Pure Internal Subdivision**:

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Auxlink",
     "author": "Auxerov",
-    "version": (1, 2, 4),
+    "version": (1, 2, 5),
     "blender": (5, 0, 0),
     "location": "3D Viewport > Right-Click > Auxlink  (also: Object menu / F3 search / N-Panel)",
     "description": "Save and edit modifier stacks as presets, YAML import/export, and Autolattice deformation",
@@ -1389,21 +1389,21 @@ class _AutolatticeCore:
     points_u: IntProperty(
         name="Columns (U / X)",
         description="Number of lattice control points along X (subdivides internally within cage)",
-        default=3,
+        default=2,
         min=1,
         max=64,
     )
     points_v: IntProperty(
         name="Rows (V / Y)",
         description="Number of lattice control points along Y (subdivides internally within cage)",
-        default=3,
+        default=2,
         min=1,
         max=64,
     )
     points_w: IntProperty(
         name="Height (W / Z)",
         description="Number of lattice control points along Z (subdivides internally within cage; set to 1 for flat single-layer cage)",
-        default=3,
+        default=2,
         min=1,
         max=64,
     )
@@ -1497,6 +1497,14 @@ class _AutolatticeCore:
         col_opt = layout.column(align=True)
         col_opt.prop(self, "use_parent", text="Parent to Mesh")
         col_opt.prop(self, "enter_edit_mode", text="Enter Edit Mode")
+
+    def invoke(self, context, event):
+        mesh_obj, mod, lat_obj = _find_lattice_pair(context)
+        if lat_obj and lat_obj.data:
+            self.points_u = lat_obj.data.points_u
+            self.points_v = lat_obj.data.points_v
+            self.points_w = lat_obj.data.points_w
+        return self.execute(context)
 
     def execute(self, context):
         act = context.active_object
@@ -1665,9 +1673,9 @@ class AUXLINK_OT_adjust_lattice(bpy.types.Operator):
     bl_description = "Subdivide columns, rows, and height within the active lattice cage"
     bl_options = {'REGISTER', 'UNDO'}
 
-    points_u: IntProperty(name="Columns (U)", default=3, min=1, max=64)
-    points_v: IntProperty(name="Rows (V)", default=3, min=1, max=64)
-    points_w: IntProperty(name="Height (W)", default=3, min=1, max=64)
+    points_u: IntProperty(name="Columns (U)", default=2, min=1, max=64)
+    points_v: IntProperty(name="Rows (V)", default=2, min=1, max=64)
+    points_w: IntProperty(name="Height (W)", default=2, min=1, max=64)
 
     @classmethod
     def poll(cls, context):
