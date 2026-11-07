@@ -6,6 +6,15 @@ Auxlink also includes **Autolattice**, tuned specifically for fast, tight-fittin
 
 ---
 
+## What's New in v1.2.3
+
+- 🧊 **Default 3x3x3 Resolution with Pure Internal Subdivision**:
+  - Restored default resolution to **3x3x3 (`U=3, V=3, W=3`)**, subdividing cleanly inside the fixed cage boundary without expanding the outer bounding box.
+  - Changing or increasing U, V, or W purely adds interior control points within the model's fitted cage.
+  - Eliminated duplicate lattices when tweaking parameters in the live redo / sidebar panel.
+
+---
+
 ## What's New in v1.2.2
 
 - 🎛️ **Default 2x2x2 Lattice Resolution (U=2, V=2, W=2)**:
