@@ -30,4 +30,5 @@ paths_exclude_pattern = [
   "*.zip",
   ".gitignore",
   "README.md",
+  "build.sh",
 ]
